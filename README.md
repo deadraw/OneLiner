@@ -2,9 +2,9 @@
 
 **A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas — in one line above your prompt.**
 
-![All good: everything green](screenshots/strip_green.png)
-![Getting tight: uncommitted work, limit filling before reset, cache cooling](screenshots/strip_yellow.png)
-![Needs you now: merge conflict, limit almost out, context nearly full](screenshots/strip_red.png)
+![All good: everything green](.github/assets/strip_green.png)
+![Getting tight: uncommitted work, limit filling before reset, cache cooling](.github/assets/strip_yellow.png)
+![Needs you now: merge conflict, limit almost out, context nearly full](.github/assets/strip_red.png)
 
 ---
 
@@ -21,7 +21,7 @@ Working with Claude Code all day, the same things keep costing time:
 
 ## The strip
 
-![All states at a glance (illustration)](screenshots/strip_all.png)
+![All states at a glance (illustration)](.github/assets/strip_all.png)
 
 | Segment | Shows | 🟢 | 🟡 | 🔴 |
 |---|---|---|---|---|
@@ -46,8 +46,8 @@ On a narrow window the strip first drops the optional extras (switch hint, `% re
 Click **`next ▾`** to open a short list above the prompt:
 
 <p>
-  <img src="screenshots/strip_next.png" alt="The next list: options from Claude's last answer" width="49%">
-  <img src="screenshots/strip_ideas.png" alt="Ideas graded gold, silver and bronze" width="49%">
+  <img src=".github/assets/strip_next.png" alt="The next list: options from Claude's last answer" width="49%">
+  <img src=".github/assets/strip_ideas.png" alt="Ideas graded gold, silver and bronze" width="49%">
 </p>
 
 - **1–4**: the options Claude offered at the end of its last answer, shortened to one line. Free: no model call.
