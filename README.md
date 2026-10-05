@@ -21,7 +21,7 @@ In Claude Code:
 /plugin install oneliner@claude-code-oneliner
 ```
 
-Restart Claude Code. To get new versions automatically: `/plugin` → Marketplaces → **claude-code-oneliner** → Enable auto-update. [Full install notes ↓](#install)
+Restart Claude Code. To get new versions automatically, turn on auto-update ([how](#from-the-marketplace-recommended)). [Full install notes ↓](#install)
 
 ---
 
@@ -107,7 +107,21 @@ Requires **Claude Code 2.1.286 or newer** (mods / function hooks).
 
 Or from a terminal: `claude plugin marketplace add deadraw/claude-code-oneliner`, then `claude plugin install oneliner@claude-code-oneliner`. Restart Claude Code and the strip appears after your first message.
 
-**Updates.** Auto-update is off by default for marketplaces outside Anthropic's own. Turn it on once in `/plugin` → Marketplaces → **claude-code-oneliner** → Enable auto-update, and new versions arrive when Claude Code starts. Or update by hand:
+**Updates.** Auto-update is off by default for marketplaces outside Anthropic's own. Turn it on once and new versions arrive when Claude Code starts:
+
+- **Terminal:** `/plugin` → Marketplaces → **claude-code-oneliner** → Enable auto-update.
+- **Desktop app** (or by hand): in `~/.claude/settings.json`, add `"autoUpdate": true` to the marketplace entry the install created:
+
+```json
+"extraKnownMarketplaces": {
+  "claude-code-oneliner": {
+    "source": { "source": "git", "url": "https://github.com/deadraw/claude-code-oneliner.git" },
+    "autoUpdate": true
+  }
+}
+```
+
+Or update by hand (the desktop app's Plugins page has an **Update** button too):
 
 ```
 /plugin marketplace update claude-code-oneliner
