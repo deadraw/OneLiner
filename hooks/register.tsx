@@ -1524,6 +1524,7 @@ export const register: Register = on => {
       )
     }
     const note = (text: string) => <Box marginLeft={4}><Text dimColor italic>{text}</Text></Box>
+    const credit = <Text dimColor>{'© deadraw '}</Text>
 
     // /strip panel: one row per part, ● on / ○ off, saved for every project.
     if (isMenuOpen) {
@@ -1558,7 +1559,10 @@ export const register: Register = on => {
           {n.aiStatus === 'error' && note('no ideas this time')}
           {n.ai.map((t, i) => gradedRow(`ai-${i}`, String(i + 1), shortLabel(t, labelMax), n.aiGrades?.[i] ?? 0, () => pick(t)))}
           {rule}
-          {row('ai-0', '0', 'back', () => void goTo('main'))}
+          <Box flexDirection="row" width={cols} justifyContent="space-between">
+            {row('ai-0', '0', 'back', () => void goTo('main'))}
+            {credit}
+          </Box>
         </Box>
       )
     }
@@ -1579,7 +1583,10 @@ export const register: Register = on => {
           {styledRow('next-s', 's', gradient(n.aiStatus === 'done' ? `✦ ${n.ai.length} ideas` : '✦ 3 more ideas', IDEAS_FROM, IDEAS_TO), openSuggest)}
           {n.aiStatus !== 'done' ? <Text dimColor>{runsOn + ' '}</Text> : null}
         </Box>
-        {styledRow('next-0', '0', <Text color="error">close</Text>, toggleNext)}
+        <Box flexDirection="row" width={cols} justifyContent="space-between">
+          {styledRow('next-0', '0', <Text color="error">close</Text>, toggleNext)}
+          {credit}
+        </Box>
       </Box>
     )
   })
