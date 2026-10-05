@@ -107,21 +107,23 @@ Requires **Claude Code 2.1.286 or newer** (mods / function hooks).
 
 Or from a terminal: `claude plugin marketplace add deadraw/claude-code-oneliner`, then `claude plugin install oneliner@claude-code-oneliner`. Restart Claude Code and the strip appears after your first message.
 
-**Updates.** Auto-update is off by default for marketplaces outside Anthropic's own. Turn it on once and new versions arrive when Claude Code starts:
+**Updates.** The first time oneliner starts after a marketplace install, it asks once: *Keep oneliner up to date automatically?* Pick **Yes** and new versions install when Claude Code starts. Your answer is saved as `"autoUpdate"` on the marketplace entry in `~/.claude/settings.json` (Claude Code leaves auto-update off by default for marketplaces outside Anthropic's own).
 
-- **Terminal:** `/plugin` → Marketplaces → **claude-code-oneliner** → Enable auto-update.
-- **Desktop app** (or by hand): in `~/.claude/settings.json`, add `"autoUpdate": true` to the marketplace entry the install created:
+To change it later:
+
+- **Terminal:** `/plugin` → Marketplaces → **claude-code-oneliner** → Enable / Disable auto-update.
+- **Desktop app** (or by hand): in `~/.claude/settings.json`, set `"autoUpdate"` to `true` or `false`:
 
 ```json
 "extraKnownMarketplaces": {
   "claude-code-oneliner": {
     "source": { "source": "git", "url": "https://github.com/deadraw/claude-code-oneliner.git" },
-    "autoUpdate": true
+    "autoUpdate": false
   }
 }
 ```
 
-Or update by hand (the desktop app's Plugins page has an **Update** button too):
+With auto-update off, update by hand (the desktop app's Plugins page has an **Update** button too):
 
 ```
 /plugin marketplace update claude-code-oneliner
@@ -194,7 +196,8 @@ No telemetry, no external services. The mod only:
 
 - runs `git` in your project (including a background `git fetch` every 5 minutes, which downloads but never changes your files),
 - checks your local dev server on `localhost`,
-- reads and writes handoff files in your project when you ask.
+- reads and writes handoff files in your project when you ask,
+- after a marketplace install, writes your auto-update answer to `~/.claude/settings.json`, once, after asking.
 
 ## Customize
 

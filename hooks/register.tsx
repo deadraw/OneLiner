@@ -889,6 +889,49 @@ async function suggestWithModel($: $, cwd: string) {
   }))
 }
 
+// ── auto-update (marketplace installs) ──────────────────────────
+
+const MARKETPLACE = 'claude-code-oneliner'
+const MARKETPLACE_URL = 'https://github.com/deadraw/claude-code-oneliner.git'
+const AUTO_UPDATE_ASKED_KEY = 'autoUpdate:asked' // one $.store value: asked once per machine
+
+type MarketplaceEntry = { source?: unknown; autoUpdate?: boolean }
+type Settings = Record<string, unknown> & { extraKnownMarketplaces?: Record<string, MarketplaceEntry> }
+
+/**
+ * Installed from the marketplace, auto-update never decided: ask once and write the answer to
+ * ~/.claude/settings.json (Claude Code leaves it off for marketplaces outside Anthropic's own).
+ */
+async function offerAutoUpdate($: $) {
+  const root = $.plugin.root.replace(/\\/g, '/')
+  const at = root.indexOf(`/plugins/cache/${MARKETPLACE}/`)
+  if (at < 0) return // git clone or plugin folder: updates come from git pull
+  if (await $.store.get(AUTO_UPDATE_ASKED_KEY)) return
+  const path = `${root.slice(0, at)}/settings.json`
+  let settings: Settings
+  try { settings = JSON.parse(String(await $.fs.read(path))) as Settings } catch { return }
+  const entry = settings.extraKnownMarketplaces?.[MARKETPLACE]
+  if (entry?.autoUpdate !== undefined) return void (await $.store.set(AUTO_UPDATE_ASKED_KEY, true)) // already decided
+  let choice: string
+  try {
+    choice = await $.ui.ask('Keep oneliner up to date automatically? New versions install when Claude Code starts.', {
+      header: 'oneliner', options: ['Yes, auto-update', 'No, I\'ll update by hand'],
+    })
+  } catch { return }
+  await $.store.set(AUTO_UPDATE_ASKED_KEY, true)
+  const isOn = choice.startsWith('Yes')
+  settings.extraKnownMarketplaces = {
+    ...settings.extraKnownMarketplaces,
+    [MARKETPLACE]: { source: { source: 'git', url: MARKETPLACE_URL }, ...entry, autoUpdate: isOn },
+  }
+  try {
+    await $.fs.write(path, JSON.stringify(settings, null, 2) + '\n')
+    $.ui.toast(isOn ? 'oneliner will update itself when Claude Code starts.' : 'Auto-update off. The Update button in Plugins gets new versions.', { timeoutMs: 6000 })
+  } catch {
+    $.ui.toast(`Couldn't save the choice to ${path}. See the README to set it by hand.`, { timeoutMs: 8000 })
+  }
+}
+
 // ── brief ───────────────────────────────────────────────────────
 
 async function buildBrief($: $, cwd: string, stored: Stored | undefined, at: number): Promise<Brief> {
@@ -968,6 +1011,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
     try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch {}
+    if (e.isInteractive) void offerAutoUpdate($)
     await $.command.register({ name: 'ship', description: 'Commit (and optionally push) the working tree' })
     await $.command.register({ name: 'brief', description: 'Show where you left off in this project' })
     await $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' })
