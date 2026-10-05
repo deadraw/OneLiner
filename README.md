@@ -40,7 +40,7 @@ Working with Claude Code all day, the same things keep costing time:
 
 ## The strip
 
-![All states at a glance (illustration)](.github/assets/strip_all.png)
+![All states and features at a glance: strips, hover details, questions in the strip, next, ideas and the brief (illustration)](.github/assets/strip_all.png)
 
 | Segment | Shows | 🟢 | 🟡 | 🔴 |
 |---|---|---|---|---|
