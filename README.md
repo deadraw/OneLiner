@@ -2,11 +2,23 @@
 
 **A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas - in one line above your prompt.**
 
+[![Latest release](https://img.shields.io/github/v/release/deadraw/claude-code-oneliner?label=release&color=6a6ae4)](https://github.com/deadraw/claude-code-oneliner/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/deadraw/claude-code-oneliner?color=e34a9e)](LICENSE)
+[![Claude Code 2.1.286+](https://img.shields.io/badge/Claude_Code-2.1.286%2B-d97757)](#install)
+
 ![oneliner in Claude Code: green, yellow, red, the next list and graded ideas](.github/assets/one-liner.gif)
 
 ![All good: everything green](.github/assets/strip_green.png)
 ![Getting tight: uncommitted work, limit filling before reset, cache cooling](.github/assets/strip_yellow.png)
 ![Needs you now: merge conflict, limit almost out, context nearly full](.github/assets/strip_red.png)
+
+### Quick install
+
+```bash
+git clone https://github.com/deadraw/claude-code-oneliner ~/.claude/mods/claude-code-oneliner
+```
+
+Then add `"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/claude-code-oneliner"` to the `env` block of `~/.claude/settings.json` and restart Claude Code. [Full install notes ↓](#install)
 
 ---
 
