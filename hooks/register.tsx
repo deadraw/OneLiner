@@ -196,7 +196,7 @@ async function noticeRemotePush($: $, branch: string) {
   const authors = log.stdout.split('\n').map(a => a.trim()).filter(Boolean)
   if (authors.length === 0) return
   const names = [...new Set(authors)].slice(0, 2).join(' and ')
-  $.ui.toast(`${names} pushed ${authors.length} commit${authors.length === 1 ? '' : 's'} to ${branch} — pull before you continue`, { timeoutMs: 10_000 })
+  $.ui.toast(`${names} pushed ${authors.length} commit${authors.length === 1 ? '' : 's'} to ${branch} - pull before you continue`, { timeoutMs: 10_000 })
 }
 
 const GIT_OPERATIONS: [string, string][] = [
@@ -394,7 +394,7 @@ async function reportRebuild($: $) {
   if (before.port === null || (before.status !== 'up' && before.status !== 'error')) return
   await probeDev($)
   const d = await read($, dev)
-  if (d.status === 'up') $.ui.toast(`Dev server rebuilt · localhost:${d.port} — reload if the page didn't update`)
+  if (d.status === 'up') $.ui.toast(`Dev server rebuilt · localhost:${d.port} - reload if the page didn't update`)
   else if (d.status === 'error') $.ui.toast(`Build error after the edit: ${d.error ?? 'see the dev server'}`, { timeoutMs: 10_000 })
 }
 
@@ -424,11 +424,11 @@ async function refreshLimit($: $) {
     const fullAt = limitFullAt(cur)
     if (fullAt !== null && fullAt - at < FORECAST_WARN_MS && cur.forecastWarnedFor !== (cur.resetsAt ?? 'now')) {
       await update($, limit, l => ({ ...l, forecastWarnedFor: l.resetsAt ?? 'now' }))
-      $.ui.toast(`At this pace the 5h limit fills ~${hhmmAt(fullAt)}${cur.resetsAt ? ` (resets ${hhmm(cur.resetsAt)})` : ''} — ship or write a handoff`, { timeoutMs: 10_000 })
+      $.ui.toast(`At this pace the 5h limit fills ~${hhmmAt(fullAt)}${cur.resetsAt ? ` (resets ${hhmm(cur.resetsAt)})` : ''} - ship or write a handoff`, { timeoutMs: 10_000 })
     }
     if (five.percentUsed >= LIMIT_WARN_PCT && cur.warnedFor !== (five.resetsAt ?? 'now')) {
       await update($, limit, l => ({ ...l, warnedFor: five.resetsAt ?? 'now' }))
-      $.ui.toast(`5h limit at ${Math.round(five.percentUsed)}%${five.resetsAt ? ` · resets ${hhmm(five.resetsAt)}` : ''} — ship or write a handoff now`, { timeoutMs: 10_000 })
+      $.ui.toast(`5h limit at ${Math.round(five.percentUsed)}%${five.resetsAt ? ` · resets ${hhmm(five.resetsAt)}` : ''} - ship or write a handoff now`, { timeoutMs: 10_000 })
     }
   } catch {}
 }
