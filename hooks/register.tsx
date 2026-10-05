@@ -15,6 +15,8 @@ const CACHE_RED_SHARE = 0.25
 // Context window: ≤50 green, 51–75 yellow, ≥76 red (+ Compact).
 const CONTEXT_YELLOW_PCT = 51
 const CONTEXT_RED_PCT = 76
+// Cache running out: offer Compact only from this context fill; below it, letting the cache rebuild is cheaper.
+const CACHE_COMPACT_MIN_PCT = 30
 // Model-switch hint on the cache segment: wide strips, warm cache, big context only.
 const SWITCH_HINT_COLS = 110
 const SWITCH_HINT_TOKENS = 100_000
@@ -939,19 +941,13 @@ async function afterCompact($: $, cwd: string, messages: readonly { text: string
   if (b.openItems.length) await showBrief($, { ...b, awayHours: 0 })
 }
 
-/** The Compact button. The engine skips this mod's own session.compact hook for the call, so its steps run here. */
-async function compactNow($: $, cwd: string) {
-  $.ui.toast('Compacting the conversation…', { timeoutMs: 60_000 })
+/** The Compact button: runs /compact exactly as if typed, so Claude Code shows its own progress. */
+async function compactNow($: $) {
   try {
-    const hasNote = await writeCompactNote($, cwd)
-    const r = await $.session.compact()
-    if (r.skip !== undefined) return $.ui.toast(`Not compacted: ${r.skip}`, { timeoutMs: 8000 })
-    const k = (t: number) => `${Math.round(t / 1000)}k`
-    $.ui.toast(r.tokensBefore && r.tokensAfter ? `Compacted: ${k(r.tokensBefore)} → ${k(r.tokensAfter)} tokens` : 'Compacted', { timeoutMs: 6000 })
-    await afterCompact($, cwd, r.messages, hasNote)
-  } catch (err) {
-    const why = err instanceof Error && err.message ? `: ${err.message}` : ''
-    $.ui.toast(`Couldn't compact${why}. Try /compact.`, { timeoutMs: 10_000 })
+    await $.command.run({ command: 'compact' })
+  } catch {
+    // Refused (e.g. mid-turn): leave it in the prompt box, one Enter away.
+    void $.prompt.fill({ text: '/compact', mode: 'replace' })
   }
 }
 
@@ -1374,7 +1370,7 @@ export const register: Register = on => {
         id: 'context',
         text: `ctx ${pct}%${k}`,
         color: pct >= CONTEXT_RED_PCT ? 'error' : pct >= CONTEXT_YELLOW_PCT ? 'warning' : 'success',
-        button: isContextRed ? { label: 'Compact', onPress: () => void compactNow($, cwd) } : undefined,
+        button: isContextRed ? { label: 'Compact', onPress: () => void compactNow($) } : undefined,
       })
     }
 
@@ -1404,7 +1400,8 @@ export const register: Register = on => {
           ...(!cold && cols >= SWITCH_HINT_COLS && share >= CACHE_RED_SHARE && (ctx.tokens ?? 0) >= SWITCH_HINT_TOKENS
             ? [{ text: ` · switch re-sends ${Math.round((ctx.tokens ?? 0) / 1000)}k`, dim: true, drop: 1 }] : []),
         ],
-        button: timeTone === 'error' && !isContextRed && !c.resetReason ? { label: 'Compact', onPress: () => void compactNow($, cwd) } : undefined,
+        // On a small context, re-sending it costs less than a compaction (which reads it all and writes a summary).
+        button: timeTone === 'error' && !isContextRed && !c.resetReason && (ctx.percent ?? 0) >= CACHE_COMPACT_MIN_PCT ? { label: 'Compact', onPress: () => void compactNow($) } : undefined,
       })
     }
 
