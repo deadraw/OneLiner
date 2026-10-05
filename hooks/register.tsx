@@ -1007,11 +1007,11 @@ export const register: Register = on => {
   let lastEffort: string | null = null // the effort the last main request used
   let demoTimer: { cancel: () => void } | null = null // /strip demo play
   let version = '' // from plugin.json, for the credit line
+  let hasOfferedAutoUpdate = false // once per session, after the first answer (the UI is up by then)
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
     try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch {}
-    if (e.isInteractive) void offerAutoUpdate($)
     await $.command.register({ name: 'ship', description: 'Commit (and optionally push) the working tree' })
     await $.command.register({ name: 'brief', description: 'Show where you left off in this project' })
     await $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' })
@@ -1033,7 +1033,7 @@ export const register: Register = on => {
     void fetchRemote($).then(() => refreshGit($))
 
     const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
-    if (e.isInteractive && stored && (at - stored.lastAt) / 3_600_000 >= BRIEF_GAP_HOURS) {
+    if (stored && (at - stored.lastAt) / 3_600_000 >= BRIEF_GAP_HOURS) {
       void buildBrief($, cwd, stored, at).then(b => showBrief($, b))
     }
 
@@ -1077,6 +1077,10 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId) return result
+    if (!hasOfferedAutoUpdate) {
+      hasOfferedAutoUpdate = true
+      void offerAutoUpdate($)
+    }
     const options = extractNextSteps(e.answer)
     await update($, nextSteps, () => ({
       isOpen: false, fromAnswer: options, ai: [], aiGrades: [], optionGrades: options.map(recommendedGrade), aiStatus: 'idle', aiVia: null,
