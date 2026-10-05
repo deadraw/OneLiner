@@ -58,7 +58,7 @@ export type NextState = {
   /** Grade per fromAnswer option: a free "I recommend" guess, replaced by the model's grade once ideas run. */
   optionGrades: number[]
   aiStatus: 'idle' | 'loading' | 'done' | 'error'
-  aiVia: 'cache' | 'haiku' | null
+  aiVia: 'cache' | 'smart' | null
   /** End of the last answer, for the Haiku digest. */
   answerTail: string
   /** Which screen of the slide-up: Claude's own options, or the model suggestions. */
@@ -70,8 +70,17 @@ export type NextState = {
 export type Brief = {
   project: string
   awayHours: number
-  openItems: string[]
-  lastPrompts: string[]
+  /** What you are working towards; null until written (or when nothing says). */
+  goal: string | null
+  /** The most recent finished work. */
+  done: string | null
+  /** 1-3 next steps, each one click to put in the prompt box. */
+  next: string[]
+  /** loading while Goal / Done / Next are written; none when nothing open was found. */
+  status: 'loading' | 'done' | 'none'
+  branch: string | null
+  ahead: number
+  /** The last commit message. */
   commits: string[]
   changed: number
 }

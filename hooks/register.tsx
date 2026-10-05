@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Brief, CacheState, ContextState, DevState, GitState, LimitState, NextState } from '../types'
 
@@ -28,7 +28,12 @@ const FAST_TICK_MS = 15_000 // only while the 5m cache applies
 const TICK_MS = 60_000 // cache + limit countdowns, limit %, dev probe; git every 2nd tick
 const BRIEF_PANE = 'oneliner-brief'
 const LIMITS_PANE = 'oneliner-limits'
-const COMMIT_MODEL = 'claude-haiku-4-5-20251001'
+const COMMIT_MODEL = 'claude-haiku-4-5-20251001' // commit messages: a short, fast job
+const SMART_MODEL = 'claude-sonnet-5-5' // the brief, the handoff note, ideas off the cache (effort low)
+// "✦ 3 more ideas" leaves the cached conversation for SMART_MODEL when the 5h limit is this full,
+// or the cache has less than this share of its lifetime left (or is cold).
+const IDEAS_SMART_LIMIT_PCT = 80
+const IDEAS_SMART_CACHE_SHARE = 0.1
 const HANDOFF_FILES = [
   '.claude/handoff.md', 'Current.md', 'CURRENT.md', 'HANDOFF.md',
   'handsoff/CURRENT.md', 'handoff/CURRENT.md', 'docs/handoff.md',
@@ -42,7 +47,7 @@ const limit = atom({ plugin: 'oneliner', key: 'limit' } as const, {
   percent: null, resetsAt: null, warnedFor: null, isOverage: false,
   samples: [], forecastWarnedFor: null, weekPercent: null, weekResetsAt: null,
 } as LimitState)
-const cache = atom({ plugin: 'oneliner', key: 'cache' } as const, { lastTurnAt: null, readPercent: null, reportedTtl: null })
+const cache = atom({ plugin: 'oneliner', key: 'cache' } as const, { lastTurnAt: null, readPercent: null, reportedTtl: null, resetReason: null } as CacheState)
 const context = atom({ plugin: 'oneliner', key: 'context' } as const, { percent: null, tokens: null, window: null } as ContextState)
 const nextSteps = atom({ plugin: 'oneliner', key: 'next' } as const, {
   isOpen: false, fromAnswer: [], ai: [], aiGrades: [], optionGrades: [], aiStatus: 'idle', aiVia: null, answerTail: '', view: 'main', model: null,
@@ -58,7 +63,10 @@ const brief = atom({ plugin: 'oneliner', key: 'brief' } as const, null)
 const isShipping = atom({ plugin: 'oneliner', key: 'isShipping' } as const, false)
 
 type $ = EngineInterface
-type Stored = { lastAt: number; prompts: string[]; cacheAt?: number }
+/** Per project: what a brief needs when you come back (your last asks, how Claude's last answer ended). */
+type Stored = { lastAt: number; prompts: string[]; cacheAt?: number; answerTail?: string; options?: string[] }
+type BriefCache = { forAt: number; goal: string | null; done: string | null; next: string[] }
+const briefCacheKey = (cwd: string) => `briefSummary:${cwd.toLowerCase()}`
 
 const isWindows = (cwd: string) => /^[A-Za-z]:[\\/]/.test(cwd)
 const storeKey = (cwd: string) => `brief:${cwd.toLowerCase()}`
@@ -78,23 +86,23 @@ function pickOpenItems(markdown: string): string[] {
 
   // 1. Items under a "Next / Exact Next Actions / Open items / TODO / Pending" heading.
   for (let i = 0; i < lines.length && out.length < 3; i++) {
-    if (!wanted.test(lines[i])) continue
-    for (let j = i + 1; j < lines.length && !isHeading(lines[j]) && out.length < 3; j++) {
-      const m = topItem.exec(lines[j])
-      if (m) out.push(m[1])
+    if (!wanted.test(lines[i] ?? '')) continue
+    for (let j = i + 1; j < lines.length && !isHeading(lines[j] ?? '') && out.length < 3; j++) {
+      const m = topItem.exec(lines[j] ?? '')
+      if (m?.[1]) out.push(m[1])
     }
   }
   // 2. Unchecked tasks anywhere: "- [ ] …".
   if (out.length === 0) {
     for (const l of lines) {
       const m = /^\s*[-*]\s+\[ \]\s+(.+)$/.exec(l)
-      if (m && out.length < 3) out.push(m[1])
+      if (m?.[1] && out.length < 3) out.push(m[1])
     }
   }
   // 3. Dated-log handoffs: the first "Next …" sentence.
   if (out.length === 0) {
     const m = /(?:^|\s)(Next\b[^.\n]{10,160})/m.exec(markdown)
-    if (m) out.push(m[1])
+    if (m?.[1]) out.push(m[1])
   }
   return out.map(t => shortLabel(t, 90))
 }
@@ -130,7 +138,7 @@ function summaryItems(summary: string): string[] {
   for (const l of lines.slice(start + 1)) {
     if (nextSection.test(l)) break
     const m = /^\s{0,3}[-*•]\s+(.+)$/.exec(l)
-    if (m) out.push(m[1].replace(/\*\*/g, '').replace(/:\s*$/, ''))
+    if (m?.[1]) out.push(m[1].replace(/\*\*/g, '').replace(/:\s*$/, ''))
     if (out.length >= 3) break
   }
   return out.map(t => shortLabel(t, 90))
@@ -379,34 +387,34 @@ async function probeDev($: $) {
   try {
     const r = await $.http.fetch(`http://localhost:${d.port}/`)
     const error = r.status >= 500 ? firstErrorLine(r.text) : null
-    await update($, dev, cur => ({ ...cur, status: error ? 'error' : 'up', error }))
+    await update($, dev, (cur): DevState => ({ ...cur, status: error ? 'error' : 'up', error }))
   } catch {
-    await update($, dev, cur => ({ ...cur, status: 'down' }))
+    await update($, dev, (cur): DevState => ({ ...cur, status: 'down' }))
   }
 }
 
 function firstErrorLine(text: string): string {
   const plain = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
   const m = /([A-Za-z]*Error[^.]{0,100})/.exec(plain)
-  return (m ? m[1] : plain).trim().slice(0, 100) || 'server error'
+  return (m?.[1] ?? plain).trim().slice(0, 100) || 'server error'
 }
 
 async function startDev($: $, cwd: string) {
   const found = await detectDev($, cwd)
   if (!found) return
-  await update($, dev, cur => ({ ...cur, status: 'starting', error: null }))
+  await update($, dev, (cur): DevState => ({ ...cur, status: 'starting', error: null }))
   void (async () => {
     try {
       for await (const piece of $.process.spawn({ argv: found.argv })) {
         if ('text' in piece && /error/i.test(piece.text)) {
-          await update($, dev, cur => ({ ...cur, error: piece.text.trim().split('\n')[0].slice(0, 100) }))
+          await update($, dev, (cur): DevState => ({ ...cur, error: (piece.text.trim().split('\n')[0] ?? '').slice(0, 100) }))
         }
         if ('text' in piece && /localhost:\d+|ready in|started server/i.test(piece.text)) {
-          await update($, dev, cur => ({ ...cur, status: 'up' }))
+          await update($, dev, (cur): DevState => ({ ...cur, status: 'up' }))
         }
       }
     } catch {}
-    await update($, dev, cur => ({ ...cur, status: 'down' }))
+    await update($, dev, (cur): DevState => ({ ...cur, status: 'down' }))
   })()
 }
 
@@ -469,6 +477,7 @@ function limitFullAt(l: LimitState): number | null {
   if (s.length < 2 || l.percent === null || !l.resetsAt) return null
   const first = s[0]
   const last = s[s.length - 1]
+  if (!first || !last) return null
   const span = last.at - first.at
   const rise = last.pct - first.pct
   if (span < FORECAST_MIN_SPAN_MS || rise <= 0) return null
@@ -492,7 +501,7 @@ function parseResetTime(text: string, at: number): number | null {
   const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i.exec(text)
   if (!m) return null
   let hour = Number(m[1]) % 12
-  if (m[3].toLowerCase() === 'pm') hour += 12
+  if (m[3]?.toLowerCase() === 'pm') hour += 12
   const d = new Date(at)
   d.setHours(hour, Number(m[2] ?? 0), 0, 0)
   if (d.getTime() <= at) d.setDate(d.getDate() + 1)
@@ -514,7 +523,7 @@ async function offerResend($: $, errorText: string, prompt: string) {
   if (options.length === 0) return
   let choice: string
   try {
-    choice = await $.ui.ask(`That prompt didn't run (${errorText.split(/[.·]/)[0].trim()}). Send it again?`, { header: 'Resend', options: [...options, 'Leave it'] })
+    choice = await $.ui.ask(`That prompt didn't run (${(errorText.split(/[.·]/)[0] ?? errorText).trim()}). Send it again?`, { header: 'Resend', options: [...options, 'Leave it'] })
   } catch { return }
   if (target && choice === `Switch to ${target} & resend`) {
     try {
@@ -607,7 +616,7 @@ async function markCacheReset($: $, reason: string) {
   await update($, cache, x => ({ ...x, resetReason: reason }))
   let tokens = 0
   try { tokens = (await $.session.usage()).context.tokens ?? 0 } catch {}
-  $.ui.toast(`${reason[0].toUpperCase() + reason.slice(1)} changed: the next message re-sends ${tokens ? `~${Math.round(tokens / 1000)}k tokens` : 'the whole conversation'} without cache`, { timeoutMs: 8000 })
+  $.ui.toast(`${reason.charAt(0).toUpperCase() + reason.slice(1)} changed: the next message re-sends ${tokens ? `~${Math.round(tokens / 1000)}k tokens` : 'the whole conversation'} without cache`, { timeoutMs: 8000 })
 }
 
 const ttlMinutes = (ttl: '5m' | '1h') => (ttl === '5m' ? 5 : 60)
@@ -732,7 +741,7 @@ const IDEAS_TO ='#e34a9e'
 function mixHex(from: string, to: string, t: number): string {
   const a = from.match(/[0-9a-f]{2}/gi)!.map(h => parseInt(h, 16))
   const b = to.match(/[0-9a-f]{2}/gi)!.map(h => parseInt(h, 16))
-  return '#' + a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, '0')).join('')
+  return '#' + a.map((v, i) => Math.round(v + ((b[i] ?? v) - v) * t).toString(16).padStart(2, '0')).join('')
 }
 const SUGGEST_PROMPT = [
   'Suggest 3 things the user could ask you to do next, written the way the user would say them.',
@@ -776,11 +785,11 @@ function shortLabel(raw: string, max = 60): string {
   const bold = /^\s*\*\*(.+?)\*\*\s*(.*)$/.exec(raw)
   let t: string
   if (bold) {
-    const head = cleanMd(bold[1]).replace(/[:.]$/, '')
+    const head = cleanMd(bold[1] ?? '').replace(/[:.]$/, '')
     // A terse title ("Tier 3") gets the start of its sentence: "Tier 3: auto-pick by cache state".
     t = head.length < 20 && !head.endsWith('?') && bold[2] ? `${head}: ${firstClause(cleanMd(bold[2]))}` : head
   } else {
-    t = firstClause(cleanMd(raw))
+    t = firstClause(cleanMd(raw)) ?? raw
   }
   t = cleanMd(t).replace(/[:.,]$/, '')
   if (t.length <= max) return t
@@ -796,10 +805,10 @@ function extractNextSteps(answer: string): string[] {
 
   // 1. The last list in the answer, if it sits near the end and the lines above it introduce choices.
   let end = -1
-  for (let i = lines.length - 1; i >= 0; i--) if (item.test(lines[i])) { end = i; break }
+  for (let i = lines.length - 1; i >= 0; i--) if (item.test(lines[i] ?? '')) { end = i; break }
   if (end >= 0 && end >= lines.length - 6) {
     let start = end
-    while (start > 0 && (item.test(lines[start - 1]) || /^\s{2,}\S/.test(lines[start - 1]))) start--
+    while (start > 0 && (item.test(lines[start - 1] ?? '') || /^\s{2,}\S/.test(lines[start - 1] ?? ''))) start--
     if (lead.test(lines.slice(Math.max(0, start - 3), start).join(' '))) {
       const items = lines.slice(start, end + 1)
         .map(l => item.exec(l)?.[1]).filter((x): x is string => !!x).map(clean)
@@ -811,8 +820,8 @@ function extractNextSteps(answer: string): string[] {
   const offers: string[] = []
   const re = /\b(?:I can(?: also)?|I could|Want me to|Should I|If you want,? I can|Tell me and I(?:'ll| will))\s+([^.?!]{6,140})[.?!]/gi
   for (const m of lines.slice(-8).join(' ').matchAll(re)) {
-    const t = cleanMd(m[1])
-    offers.push(t[0].toUpperCase() + t.slice(1))
+    const t = cleanMd(m[1] ?? '')
+    if (t) offers.push(t.charAt(0).toUpperCase() + t.slice(1))
   }
   return [...new Set(offers)].slice(0, NEXT_MAX)
 }
@@ -828,7 +837,7 @@ function parseGraded(text: string): Graded {
     if (option) { out.optionGrades.set(Number(option[1]) - 1, Number(option[2])); continue }
     const idea = /^IDEA\s+([1-3])\s+(.+)$/i.exec(line)
     const bare = line.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '')
-    if (idea) { out.ideas.push(idea[2].trim()); out.ideaGrades.push(Number(idea[1])) }
+    if (idea?.[2]) { out.ideas.push(idea[2].trim()); out.ideaGrades.push(Number(idea[1])) }
     else if (bare.length > 3 && !/^(IDEAS?|OPTIONS?)\b/i.test(bare)) { out.ideas.push(bare); out.ideaGrades.push(0) }
   }
   out.ideas = out.ideas.slice(0, 3)
@@ -837,8 +846,10 @@ function parseGraded(text: string): Graded {
 }
 
 /** Tier 3, on request only: green/yellow cache → ask over the cached conversation; red/cold → Haiku on a digest. */
-function suggestVia(c: CacheState, l: LimitState, at: number): 'cache' | 'haiku' {
-  return cacheShare(c, l, at) >= CACHE_RED_SHARE ? 'cache' : 'haiku'
+/** Ideas over the cached conversation (cheap reads) while it pays off; SMART_MODEL on a digest when the limit is high or the cache nearly gone. */
+function suggestVia(c: CacheState, l: LimitState, at: number): 'cache' | 'smart' {
+  const isLimitHigh = (l.percent ?? 0) >= IDEAS_SMART_LIMIT_PCT
+  return !isLimitHigh && cacheShare(c, l, at) >= IDEAS_SMART_CACHE_SHARE ? 'cache' : 'smart'
 }
 
 const shortModel = (id: string | null) =>
@@ -858,29 +869,30 @@ async function suggestWithModel($: $, cwd: string) {
   ].filter(Boolean).join('\n')
   const ask = `${SUGGEST_PROMPT} ${GRADE_RULES}${offered}${format}`
   let via = suggestVia(c, l, await $.clock.now())
-  await update($, nextSteps, s => ({ ...s, aiStatus: 'loading', aiVia: via }))
+  await update($, nextSteps, (s): NextState => ({ ...s, aiStatus: 'loading', aiVia: via }))
 
   let text: string | null = null
   if (via === 'cache') {
     const r = await $.model.fork({ prompt: ask })
     if (r.isAnswered) text = r.text
-    else via = 'haiku' // nothing to fork, or it failed: fall back to the cheap path
+    else via = 'smart' // nothing to fork, or it failed: fall back to the digest
   }
   if (text === null) {
     const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
     let status = ''
     try { status = (await runGit($, ['status', '--short'])).stdout.split('\n').slice(0, 30).join('\n') } catch {}
     const r = await $.model.complete({
-      model: COMMIT_MODEL,
-      maxTokens: 260,
-      timeoutMs: 20_000,
+      model: SMART_MODEL,
+      effort: 'low',
+      maxTokens: 2000, // thinking counts toward it
+      timeoutMs: 30_000,
       system: 'You help a developer decide what to ask their coding agent next.',
       prompt: `${ask}\n\nThe developer's recent requests:\n${(stored?.prompts ?? []).map(p => `- ${p}`).join('\n')}\n\nEnd of the agent's last answer:\n${n.answerTail}\n\nUncommitted files:\n${status || '(none)'}`,
     })
     if (r.isAnswered) text = r.text
   }
   const g = text ? parseGraded(text) : { ideas: [], ideaGrades: [], optionGrades: new Map<number, number>() }
-  await update($, nextSteps, s => ({
+  await update($, nextSteps, (s): NextState => ({
     ...s,
     ai: g.ideas,
     aiGrades: g.ideaGrades,
@@ -945,55 +957,176 @@ async function saveAutoUpdate($: $, isOn: boolean) {
 
 // ── brief ───────────────────────────────────────────────────────
 
-async function buildBrief($: $, cwd: string, stored: Stored | undefined, at: number): Promise<Brief> {
+/** Everything a brief or a handoff note is written from: your handoff file, your last asks, Claude's last answer, git. */
+async function briefMaterial($: $, cwd: string, stored: Stored | undefined): Promise<string> {
+  const parts: string[] = []
+  const handoff = await newestHandoff($, cwd)
+  if (handoff) {
+    try { parts.push(`Handoff file (${handoff.slice(cwd.length + 1)}):\n${String(await $.fs.read(handoff)).slice(0, 3000)}`) } catch {}
+  }
+  if (stored?.prompts.length) parts.push(`The developer's last requests, oldest first:\n${stored.prompts.map(p => `- ${p}`).join('\n')}`)
+  if (stored?.answerTail) parts.push(`End of the coding agent's last answer:\n${stored.answerTail}`)
+  if (stored?.options?.length) parts.push(`Options the agent offered at the end:\n${stored.options.map(o => `- ${cleanMd(o)}`).join('\n')}`)
+  try {
+    const log = await runGit($, ['log', '-5', '--format=%s'])
+    if (log.exitCode === 0 && log.stdout.trim()) parts.push(`Last commits:\n${log.stdout.trim()}`)
+    const status = await runGit($, ['status', '--short'])
+    if (status.exitCode === 0 && status.stdout.trim()) parts.push(`Uncommitted files:\n${status.stdout.split('\n').slice(0, 20).join('\n')}`)
+  } catch {}
+  return parts.join('\n\n')
+}
+
+const BRIEF_PROMPT = [
+  'Write a short "where you left off" brief for a developer coming back to this project.',
+  'Use only what the material shows. Be concrete: name files, features and versions. Plain words, no markdown.',
+  'Reply with exactly these lines and nothing else:',
+  'GOAL <what they are working towards, one line>',
+  'DONE <the most recent finished work, one line>',
+  'NEXT <a concrete next step, phrased as a request to their coding agent>   (1 to 3 lines, most important first)',
+].join('\n')
+
+/** GOAL / DONE / NEXT lines from the model's reply. */
+function parseBriefReply(text: string): BriefCache | null {
+  const line = (tag: string) => text.split('\n').map(l => l.trim()).filter(l => l.toUpperCase().startsWith(`${tag} `)).map(l => l.slice(tag.length + 1).trim())
+  const next = line('NEXT').slice(0, 3)
+  const goal = line('GOAL')[0] ?? null
+  if (!goal && !next.length) return null
+  return { forAt: 0, goal, done: line('DONE')[0] ?? null, next }
+}
+
+/** Goal / Done / Next from a handoff note written in that shape (headings), or null. */
+function noteSections(markdown: string): BriefCache | null {
+  const sections: Record<string, string[]> = {}
+  let current = ''
+  for (const raw of markdown.split('\n')) {
+    const heading = /^#{1,4}\s*(.+?)\s*$/.exec(raw)
+    if (heading) { current = (heading[1] ?? '').toLowerCase(); sections[current] = []; continue }
+    if (current && raw.trim()) (sections[current] ??= []).push(raw.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, ''))
+  }
+  const first = (name: string) => Object.entries(sections).find(([h]) => h.startsWith(name))?.[1] ?? []
+  const next = first('next').slice(0, 3)
+  const goal = first('goal')[0] ?? null
+  if (!goal && !next.length) return null
+  return { forAt: 0, goal, done: first('done')[0] ?? null, next }
+}
+
+/** The free part of the brief, shown at once; fillBrief adds Goal / Done / Next. Null when there is nothing to say. */
+async function buildBrief($: $, cwd: string, stored: Stored | undefined, at: number): Promise<Brief | null> {
   const g = await refreshGit($)
   let commits: string[] = []
   try {
-    const r = await runGit($, ['log', '-3', '--format=%s'])
+    const r = await runGit($, ['log', '-1', '--format=%s'])
     if (r.exitCode === 0) commits = r.stdout.trim().split('\n').filter(Boolean)
   } catch {}
+  const hasHandoff = (await newestHandoff($, cwd)) !== null
+  if (!stored?.prompts.length && !commits.length && !g.changed && !hasHandoff) return null
   return {
     project: cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd,
     awayHours: stored ? Math.round((at - stored.lastAt) / 3_600_000) : 0,
-    openItems: await readHandoff($, cwd),
-    lastPrompts: stored?.prompts ?? [],
+    goal: null,
+    done: null,
+    next: [],
+    status: 'loading',
+    branch: g.isRepo ? g.branch : null,
+    ahead: g.ahead,
     commits,
     changed: g.changed,
   }
 }
 
+/**
+ * Goal / Done / Next, cheapest first: a handoff note written after your last message (free),
+ * a summary already made for the same point (free), else one SMART_MODEL call.
+ */
+async function fillBrief($: $, cwd: string, stored: Stored | undefined) {
+  const forAt = stored?.lastAt ?? 0
+  let found: BriefCache | null = null
+  try {
+    const notePath = `${cwd}/.claude/handoff.md`
+    if (await $.fs.exists(notePath) && (await $.fs.stat(notePath)).mtimeMs >= forAt) {
+      found = noteSections(String(await $.fs.read(notePath)))
+    }
+  } catch {}
+  if (!found) {
+    const cached = (await $.store.get(briefCacheKey(cwd))) as BriefCache | undefined
+    if (cached && cached.forAt === forAt) found = cached
+  }
+  if (!found) {
+    const material = await briefMaterial($, cwd, stored)
+    if (material) {
+      const r = await $.model.complete({
+        model: SMART_MODEL, effort: 'low', maxTokens: 2000, timeoutMs: 30_000,
+        system: 'You help a developer pick up their work where they left it.',
+        prompt: `${BRIEF_PROMPT}\n\n${material}`,
+      })
+      if (r.isAnswered) found = parseBriefReply(r.text)
+      if (found) await $.store.set(briefCacheKey(cwd), { ...found, forAt })
+    }
+  }
+  // Nothing written: the handoff file's open items, or Claude's last options, still say what is next.
+  const openItems = found?.next.length ? [] : await readHandoff($, cwd)
+  const next = found?.next.length ? found.next : openItems.length ? openItems : (stored?.options ?? []).map(o => shortLabel(o, 90))
+  const status: Brief['status'] = found || next.length ? 'done' : 'none'
+  await update($, brief, b => b && { ...b, goal: found?.goal ?? null, done: found?.done ?? null, next, status })
+}
+
 async function showBrief($: $, b: Brief) {
-  if (!b.openItems.length && !b.lastPrompts.length && !b.commits.length && !b.changed) return
   await update($, brief, () => b)
   await $.ui.open({ id: BRIEF_PANE, title: 'Where you left off' })
 }
 
+/** Builds, shows and fills the brief; nothing opens when there is nothing to say. */
+async function openBrief($: $, cwd: string, stored: Stored | undefined, at: number, awayHours?: number) {
+  const b = await buildBrief($, cwd, stored, at)
+  if (!b) return false
+  await showBrief($, awayHours === undefined ? b : { ...b, awayHours })
+  await fillBrief($, cwd, stored)
+  return true
+}
+
 // ── compaction ──────────────────────────────────────────────────
 
-/** Before compacting: a handoff note while the full transcript is still there. Right after a resume there is nothing to fork yet; the compaction summary covers that case. */
+const NOTE_PROMPT = 'Write a handoff note so this work can continue after the context is compacted. Markdown only, no preamble. Sections: "## Goal" (one line), "## Done" (one line: the most recent finished work), "## Next" (1-3 "- " bullets, concrete, phrased as requests to the coding agent, most important first), "## Decisions" (max 5 "- " bullets).'
+
+/**
+ * Before compacting: a handoff note while the full transcript is still there (a fork over the cache).
+ * Right after a resume there is nothing to fork yet: SMART_MODEL writes it from the same material as the brief.
+ */
 async function writeCompactNote($: $, cwd: string): Promise<boolean> {
   if (!cwd) return false
-  const r = await $.model.fork({
-    prompt: 'Write a handoff note so this work can continue after the context is compacted. Markdown only, no preamble. Sections: "## Open items" (max 5 "- " bullets, most important first, concrete file/page names) and "## Decisions" (max 5 bullets).',
-  })
-  if (!r.isAnswered || !r.text.trim()) return false
+  let text = ''
+  const r = await $.model.fork({ prompt: NOTE_PROMPT })
+  if (r.isAnswered) text = r.text.trim()
+  if (!text) {
+    const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
+    const material = await briefMaterial($, cwd, stored)
+    if (!material) return false
+    const s = await $.model.complete({
+      model: SMART_MODEL, effort: 'low', maxTokens: 3000, timeoutMs: 30_000,
+      system: 'You write handoff notes for a coding agent.',
+      prompt: `${NOTE_PROMPT}\n\n${material}`,
+    })
+    if (s.isAnswered) text = s.text.trim()
+  }
+  if (!text) return false
   try {
-    await $.fs.write(`${cwd}/.claude/handoff.md`, `<!-- oneliner ${new Date().toISOString()} -->\n${r.text.trim()}\n`)
+    await $.fs.write(`${cwd}/.claude/handoff.md`, `<!-- oneliner ${new Date().toISOString()} -->\n${text}\n`)
     return true
   } catch { return false }
 }
 
-/** After compacting: the cache starts cold, and the brief shows what is still open. */
+/** After compacting: the cache starts cold, and the brief shows Goal / Done / Next from the fresh note (no extra call). */
 async function afterCompact($: $, cwd: string, messages: readonly { text: string }[], hasNote: boolean) {
   await update($, cache, c => ({ ...c, lastTurnAt: null, readPercent: null }))
   void refreshLimit($)
   if (!cwd) return
   const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
-  const b = await buildBrief($, cwd, stored, await $.clock.now())
+  const at = await $.clock.now()
+  if (hasNote) return void (await openBrief($, cwd, stored, at, 0))
+  // No note: the compaction summary's pending tasks, if it has any. Never a paid call here.
   const fromSummary = summaryItems(messages.map(m => m.text).join('\n'))
-  if (!hasNote && fromSummary.length) b.openItems = fromSummary
-  // Your last asks are no news right after a compaction: open the pane only for open work.
-  if (b.openItems.length) await showBrief($, { ...b, awayHours: 0 })
+  const b = fromSummary.length ? await buildBrief($, cwd, stored, at) : null
+  if (b) await showBrief($, { ...b, awayHours: 0, next: fromSummary, status: 'done' })
 }
 
 /** The Compact button: runs /compact exactly as if typed, so Claude Code shows its own progress. */
@@ -1038,14 +1171,14 @@ export const register: Register = on => {
     const at = await $.clock.now()
     await update($, now, () => at)
     const found = await detectDev($, cwd)
-    await update($, dev, () => ({ port: found?.port ?? null, status: found ? 'down' : 'none', error: null }))
+    await update($, dev, (): DevState => ({ port: found?.port ?? null, status: found ? 'down' : 'none', error: null }))
     await Promise.all([refreshGit($), refreshLimit($), probeDev($)])
     await seedCache($, cwd, at)
     void fetchRemote($).then(() => refreshGit($))
 
     const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
     if (stored && (at - stored.lastAt) / 3_600_000 >= BRIEF_GAP_HOURS) {
-      void buildBrief($, cwd, stored, at).then(b => showBrief($, b))
+      void openBrief($, cwd, stored, at)
     }
 
     let ticks = 0
@@ -1074,7 +1207,7 @@ export const register: Register = on => {
     if (cwd && e.text.trim() && !e.text.startsWith('/')) {
       const key = storeKey(cwd)
       const stored = ((await $.store.get(key)) as Stored | undefined) ?? { lastAt: 0, prompts: [] }
-      const prompts = [...stored.prompts, e.text.trim().replace(/\s+/g, ' ').slice(0, 140)].slice(-3)
+      const prompts = [...stored.prompts, e.text.trim().replace(/\s+/g, ' ').slice(0, 300)].slice(-5)
       await $.store.set(key, { ...stored, lastAt: await $.clock.now(), prompts }) // keep cacheAt
     }
     editedThisTurn = false
@@ -1089,7 +1222,7 @@ export const register: Register = on => {
     const result = await next(e)
     if (e.agentId) return result
     const options = extractNextSteps(e.answer)
-    await update($, nextSteps, () => ({
+    await update($, nextSteps, (): NextState => ({
       isOpen: false, fromAnswer: options, ai: [], aiGrades: [], optionGrades: options.map(recommendedGrade), aiStatus: 'idle', aiVia: null,
       answerTail: e.answer.slice(-1500), view: 'main', model: e.usage?.model ?? null,
     }))
@@ -1102,7 +1235,7 @@ export const register: Register = on => {
     await update($, now, () => at)
     if (cwd) {
       const stored = ((await $.store.get(storeKey(cwd))) as Stored | undefined) ?? { lastAt: 0, prompts: [] }
-      await $.store.set(storeKey(cwd), { ...stored, lastAt: at, cacheAt: cacheFrom })
+      await $.store.set(storeKey(cwd), { ...stored, lastAt: at, cacheAt: cacheFrom, answerTail: e.answer.slice(-1500), options })
     }
     void Promise.all([refreshGit($), refreshLimit($), probeDev($)])
     if (editedThisTurn) {
@@ -1232,8 +1365,11 @@ export const register: Register = on => {
     const pace = (() => {
       const s = l.samples ?? []
       if (s.length < 2) return null
-      const span = s[s.length - 1].at - s[0].at
-      return span >= FORECAST_MIN_SPAN_MS ? ((s[s.length - 1].pct - s[0].pct) / span) * 3_600_000 : null
+      const first = s[0]
+      const last = s[s.length - 1]
+      if (!first || !last) return null
+      const span = last.at - first.at
+      return span >= FORECAST_MIN_SPAN_MS ? ((last.pct - first.pct) / span) * 3_600_000 : null
     })()
     const points = h.resetsAt === l.resetsAt ? h.points : []
     // Each column is a slice of the 5h window: past → last reading; future → the forecast line.
@@ -1243,7 +1379,7 @@ export const register: Register = on => {
       const t = start + ((i + 1) / width) * WINDOW_MS
       if (t <= nowAt) {
         const before = points.filter(p => p.at <= t)
-        past.push(before.length ? before[before.length - 1].pct : null)
+        past.push(before[before.length - 1]?.pct ?? null)
         future.push(null)
       } else {
         past.push(null)
@@ -1268,9 +1404,9 @@ export const register: Register = on => {
         </Box>
         {pastRows.map((row, r) => (
           <Box flexDirection="row">
-            <Text dimColor>{axis[r].padStart(3)} │</Text>
+            <Text dimColor>{(axis[r] ?? '').padStart(3)} │</Text>
             <Text color={tone}>{row.slice(0, nowCol + 1)}</Text>
-            <Text dimColor>{futureRows[r].slice(nowCol + 1)}</Text>
+            <Text dimColor>{(futureRows[r] ?? '').slice(nowCol + 1)}</Text>
           </Box>
         ))}
         <Text dimColor>{'    └' + '─'.repeat(width)}</Text>
@@ -1301,7 +1437,7 @@ export const register: Register = on => {
         await update($, stripMenu, () => false)
         let i = 0
         const step = () => {
-          const [lvl, ms] = DEMO_PLAY[i]
+          const [lvl, ms] = DEMO_PLAY[i % DEMO_PLAY.length]!
           void update($, demo, () => lvl)
           demoTimer = $.clock.after(ms, () => { i = (i + 1) % DEMO_PLAY.length; step() })
         }
@@ -1331,8 +1467,8 @@ export const register: Register = on => {
 
   on('command.run', { command: 'brief' }, async $ => {
     const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
-    await showBrief($, await buildBrief($, cwd, stored, await $.clock.now()))
-    return { text: 'Brief opened.' }
+    const isOpened = await openBrief($, cwd, stored, await $.clock.now())
+    return { text: isOpened ? 'Brief opened.' : 'Nothing to brief yet in this folder: no earlier messages, git history or handoff file.' }
   })
 
   // ── the strip ─────────────────────────────────────────────────
@@ -1464,7 +1600,7 @@ export const register: Register = on => {
     }
 
     // next steps toggle
-    const toggleNext = () => void update($, nextSteps, s => ({ ...s, isOpen: !s.isOpen, view: 'main' }))
+    const toggleNext = () => void update($, nextSteps, (s): NextState => ({ ...s, isOpen: !s.isOpen, view: 'main' }))
     segs.push({
       id: 'next', text: '',
       button: { label: n.isOpen ? 'next ▴' : n.fromAnswer.length ? `next ${n.fromAnswer.length} ▾` : 'next ▾', onPress: toggleNext },
@@ -1548,13 +1684,13 @@ export const register: Register = on => {
     // The slide-up: picks fill the prompt (never send), 1–4 / s / 0 as hotkeys.
     const pick = (text: string) => {
       void $.prompt.fill({ text: cleanMd(text), mode: 'replace' })
-      void update($, nextSteps, s => ({ ...s, isOpen: false, view: 'main' }))
+      void update($, nextSteps, (s): NextState => ({ ...s, isOpen: false, view: 'main' }))
     }
     const goTo = (view: 'main' | 'suggest') => update($, nextSteps, s => ({ ...s, view }))
     const via = n.aiVia ?? suggestVia(c, l, at)
     const runsOn = via === 'cache'
       ? `${shortModel(n.model)} · from cache${ctx.tokens ? ` ~${Math.round(ctx.tokens / 1000)}k` : ''}`
-      : `${shortModel(COMMIT_MODEL)} · ~3k`
+      : `${shortModel(SMART_MODEL)} · ~3k`
 
     // Layout shared by both screens: a title row (meta on the right), indented rows, a thin rule, the exit row.
     const labelMax = Math.max(24, Math.min(64, cols - 12))
@@ -1573,7 +1709,7 @@ export const register: Register = on => {
       </Box>
     )
     // A row whose text is styled: a small › button carries the hotkey and the click, the content beside it the color.
-    const styledRow = (key: string, hotkey: string, content: unknown, onPress: () => void) => (
+    const styledRow = (key: string, hotkey: string, content: RenderChildren, onPress: () => void) => (
       <Box key={key} flexDirection="row" marginLeft={2} gap={1}>
         <Button key={`${key}-b`} plain hotkey={hotkey} label="›" onPress={onPress} />
         {content}
@@ -1669,22 +1805,29 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const b = await read($, brief)
     if (!b) return <Text dimColor>No brief yet.</Text>
-    const resume = b.openItems[0] ?? b.lastPrompts[b.lastPrompts.length - 1]
+    const fill = (step: string) => void $.prompt.fill({ text: step, mode: 'replace' })
+    const firstStep = b.next[0]
+    const label = (text: string) => <Text dimColor>{text.padEnd(6)}</Text>
+    const repo = b.branch
+      ? [b.branch, b.ahead ? `${b.ahead} unpushed` : '', b.changed ? `${b.changed} changed` : ''].filter(Boolean).join(' · ')
+      : ''
     return (
       <Box flexDirection="column" gap={0}>
         <Text bold>{b.project}{b.awayHours ? ` · away ${b.awayHours}h` : ''}</Text>
-        {b.openItems.length > 0 && <Text dimColor>Open items</Text>}
-        {b.openItems.map(item => <Text wrap="truncate">  ▸ {item}</Text>)}
-        {b.lastPrompts.length > 0 && <Text dimColor>Your last asks</Text>}
-        {b.lastPrompts.map(p => <Text wrap="truncate">  › {p}</Text>)}
-        {b.commits.length > 0 && <Text dimColor>Last commits</Text>}
-        {b.commits.map(cm => <Text wrap="truncate">  • {cm}</Text>)}
-        {b.changed > 0 && <Text color="warning">{b.changed} uncommitted file{b.changed === 1 ? '' : 's'}</Text>}
+        {b.status === 'loading' && <Text dimColor italic>  summarizing…</Text>}
+        {b.goal && <Box flexDirection="row">{label('Goal')}<Text wrap="truncate">{b.goal}</Text></Box>}
+        {b.done && <Box flexDirection="row">{label('Done')}<Text wrap="truncate">{b.done}</Text></Box>}
+        {b.next.map((step, i) => (
+          <Box key={`next-${i}`} flexDirection="row">
+            {label(i === 0 ? 'Next' : '')}
+            <Button key={`next-${i}-b`} plain hotkey={String(i + 1)} label={step} onPress={() => fill(step)} />
+          </Box>
+        ))}
+        {b.status === 'none' && <Text dimColor>  Nothing open found.</Text>}
+        {repo && <Box flexDirection="row">{label('Repo')}<Text dimColor wrap="truncate">{repo}</Text></Box>}
+        {b.commits[0] && <Box flexDirection="row">{label('Last')}<Text dimColor wrap="truncate">{b.commits[0]}</Text></Box>}
         <Box flexDirection="row" gap={1} marginTop={1}>
-          {resume && (
-            <Button key="continue" variant="primary" label="Continue"
-              onPress={() => void $.prompt.fill({ text: `Continue from where we left off: ${resume}`, mode: 'replace' })} />
-          )}
+          {firstStep && <Button key="continue" variant="primary" label="Continue with 1" onPress={() => fill(firstStep)} />}
           <Button key="dismiss" role="dismiss" label="Dismiss" onPress={() => void $.ui.close({ id: BRIEF_PANE })} />
         </Box>
       </Box>

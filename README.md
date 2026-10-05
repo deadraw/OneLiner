@@ -70,7 +70,7 @@ Click **`next ▾`** to open a short list above the prompt:
 - **1–4**: the options Claude offered at the end of its last answer, shortened to one line. Free: no model call.
 - **s ✦ 3 more ideas**: three new suggestions written the way you would ask, graded **gold / silver / bronze** by how much they move your current goal forward.
   - While the cache is warm, they're asked over the cached conversation (cheap).
-  - When it's cold, Claude Haiku answers on a short digest instead.
+  - When the cache is nearly gone (under 10% of its lifetime left) or cold, or your 5-hour limit is at 80% or more, Claude Sonnet answers on a short digest instead.
   - Generated at most once per turn.
 
 Picking an item fills your prompt box. Nothing is sent until you press Enter.
@@ -82,7 +82,7 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 | `/ship` | Commit (and optionally push). Runs your build first, writes the commit message, asks before pushing. Refuses during a conflict. |
 | `/handoff` | Updates your `CURRENT.md` / `HANDOFF.md` from the conversation, keeping its structure. Asks before writing, keeps a backup. |
 | `/limits` | A chart of the current 5-hour window: usage so far, pace, forecast, reset time, weekly window. |
-| `/brief` | Where you left off in this project: open items from your handoff file, your last requests, last commits, uncommitted files. Also opens by itself after a gap of 6+ hours. |
+| `/brief` | Where you left off in this project: **Goal**, **Done** and up to three **Next** steps (each one click into the prompt box), plus branch, unpushed and changed files. Also opens by itself after 6+ hours away and after a compaction. |
 | `/strip` | Turn strip parts on or off (`/strip cache`, `/strip all`). Saved for all projects. |
 | `/strip demo green` | Sample values for screenshots: `green`, `yellow`, `red`, `next` (the list open), `ideas` (graded ideas), or `play` to loop through all of them for a screen recording. Buttons are off and nothing is spent; `/strip demo off` returns to your real values. |
 
@@ -184,11 +184,12 @@ Almost nothing. Everything on the strip is read from data Claude Code already ha
 
 | Feature | Cost |
 |---|---|
-| The strip, popups, `/limits`, `/brief`, `/strip`, options from the last answer | free |
-| `✦ 3 more ideas` | one small question; cheap from a warm cache, a few thousand Haiku tokens otherwise |
+| The strip, popups, `/limits`, `/strip`, options from the last answer | free |
+| `/brief` | free after a compaction (it reads the fresh handoff note); otherwise one short Claude Sonnet call, reused until you send something new |
+| `✦ 3 more ideas` | one small question; cheap from a warm cache, a few thousand Claude Sonnet tokens otherwise |
 | `/handoff` | one question over the cached conversation, plus writing the file |
 | `/ship` commit message | one short Claude Haiku call |
-| Handoff note before compaction (`.claude/handoff.md`) | one question over the cached conversation, once per compaction |
+| Handoff note before compaction (`.claude/handoff.md`) | one question over the cached conversation, once per compaction (Claude Sonnet when there is nothing cached yet) |
 
 ## Privacy
 
@@ -213,6 +214,9 @@ Everything tunable is a named setting at the top of [`hooks/register.tsx`](hooks
 | `GRADE_STYLE` | `'text'` (colored text) or `'dot'` (colored ●) |
 | `IDEAS_FROM`, `IDEAS_TO` | the `next` gradient, `#6a6ae4` → `#e34a9e` |
 | `SHIP_BUILD` | `true`: build before committing |
+| `SMART_MODEL` | `claude-sonnet-5-5` (effort low): the brief, the handoff note, ideas off the cache |
+| `COMMIT_MODEL` | `claude-haiku-4-5`: commit messages |
+| `IDEAS_SMART_LIMIT_PCT`, `IDEAS_SMART_CACHE_SHARE` | 80, 0.1: when ideas switch from the cached conversation to `SMART_MODEL` |
 | `BRIEF_GAP_HOURS` | 6 |
 
 Handoff files are looked for at `.claude/handoff.md`, `Current.md`, `CURRENT.md`, `HANDOFF.md`, `handsoff/CURRENT.md`, `handoff/CURRENT.md` and `docs/handoff.md`; the most recently edited one wins.
