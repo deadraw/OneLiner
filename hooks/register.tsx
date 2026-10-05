@@ -116,6 +116,23 @@ async function readHandoff($: $, cwd: string): Promise<string[]> {
   try { return pickOpenItems(String(await $.fs.read(path))) } catch { return [] }
 }
 
+/** The open work from a compaction summary: bullets under its "Pending Tasks" / "Next Step" section. */
+function summaryItems(summary: string): string[] {
+  const lines = summary.split('\n')
+  const section = /^\s*(?:\d+\.\s*|#{1,4}\s*)?(?:pending tasks|next steps?|optional next step)\b/i
+  const nextSection = /^(?:\d+\.\s+[A-Z][^\n]*:\s*|#{1,4}\s.*)$/
+  const start = lines.findIndex(l => section.test(l))
+  if (start < 0) return []
+  const out: string[] = []
+  for (const l of lines.slice(start + 1)) {
+    if (nextSection.test(l)) break
+    const m = /^\s{0,3}[-*•]\s+(.+)$/.exec(l)
+    if (m) out.push(m[1].replace(/\*\*/g, '').replace(/:\s*$/, ''))
+    if (out.length >= 3) break
+  }
+  return out.map(t => shortLabel(t, 90))
+}
+
 // ── /handoff: update YOUR handoff file from the conversation ────
 
 const HANDOFF_BACKUP = '.claude/handoff-backup.md'
@@ -134,7 +151,12 @@ async function writeHandoff($: $, cwd: string) {
       ? `Update the project's handoff document so another session or AI agent can continue this work. Current ${name}:\n<<<\n${before}\n>>>\nRewrite it with everything this conversation changed: completed work, decisions, open issues and the exact next actions. Keep its structure, headings, tone and language; keep what is still true, remove what no longer is. Reply with the complete updated file only: no commentary, no code fences.`
       : 'Write a handoff document (Markdown) so another session or AI agent can continue this project. Sections: "## Current state", "## Decisions", "## Known issues", "## Exact next actions" (numbered). Concrete, current, no commentary, no code fences.'
     const r = await $.model.fork({ prompt: ask })
-    if (!r.isAnswered || !r.text.trim()) return $.ui.toast(`Couldn't write ${name}: the model gave no answer`)
+    if (!r.isAnswered) {
+      return $.ui.toast(r.reason === 'nothing-to-fork'
+        ? `Couldn't write ${name} yet: send one message in this session first, then try again`
+        : `Couldn't write ${name}: the model gave no answer (${r.reason})`, { timeoutMs: 8000 })
+    }
+    if (!r.text.trim()) return $.ui.toast(`Couldn't write ${name}: the model gave no answer`)
     const after = r.text.trim().replace(/^```(?:markdown|md)?\n|\n```$/g, '') + '\n'
     const { added, removed } = lineDiff(before, after)
     let choice: string
@@ -492,8 +514,13 @@ async function offerResend($: $, errorText: string, prompt: string) {
     choice = await $.ui.ask(`That prompt didn't run (${errorText.split(/[.·]/)[0].trim()}). Send it again?`, { header: 'Resend', options: [...options, 'Leave it'] })
   } catch { return }
   if (target && choice === `Switch to ${target} & resend`) {
-    await $.command.run({ command: 'model', args: target })
-    await $.prompt.submit({ text: prompt })
+    try {
+      await $.command.run({ command: 'model', args: target })
+      await $.prompt.submit({ text: prompt })
+    } catch {
+      $.ui.toast(`Couldn't switch to ${target}. Your prompt is back in the box.`, { timeoutMs: 8000 })
+      void $.prompt.fill({ text: prompt, mode: 'replace' })
+    }
   } else if (resetAt && choice.startsWith('Resend at')) {
     $.clock.after(Math.max(0, resetAt + 60_000 - at), () => void $.prompt.submit({ text: prompt }))
     $.ui.toast(`Will resend at ${hhmmAt(resetAt + 60_000)}. Keep this session open until then.`, { timeoutMs: 8000 })
@@ -879,8 +906,53 @@ async function buildBrief($: $, cwd: string, stored: Stored | undefined, at: num
 }
 
 async function showBrief($: $, b: Brief) {
+  if (!b.openItems.length && !b.lastPrompts.length && !b.commits.length && !b.changed) return
   await update($, brief, () => b)
   await $.ui.open({ id: BRIEF_PANE, title: 'Where you left off' })
+}
+
+// ── compaction ──────────────────────────────────────────────────
+
+/** Before compacting: a handoff note while the full transcript is still there. Right after a resume there is nothing to fork yet; the compaction summary covers that case. */
+async function writeCompactNote($: $, cwd: string): Promise<boolean> {
+  if (!cwd) return false
+  const r = await $.model.fork({
+    prompt: 'Write a handoff note so this work can continue after the context is compacted. Markdown only, no preamble. Sections: "## Open items" (max 5 "- " bullets, most important first, concrete file/page names) and "## Decisions" (max 5 bullets).',
+  })
+  if (!r.isAnswered || !r.text.trim()) return false
+  try {
+    await $.fs.write(`${cwd}/.claude/handoff.md`, `<!-- oneliner ${new Date().toISOString()} -->\n${r.text.trim()}\n`)
+    return true
+  } catch { return false }
+}
+
+/** After compacting: the cache starts cold, and the brief shows what is still open. */
+async function afterCompact($: $, cwd: string, messages: readonly { text: string }[], hasNote: boolean) {
+  await update($, cache, c => ({ ...c, lastTurnAt: null, readPercent: null }))
+  void refreshLimit($)
+  if (!cwd) return
+  const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
+  const b = await buildBrief($, cwd, stored, await $.clock.now())
+  const fromSummary = summaryItems(messages.map(m => m.text).join('\n'))
+  if (!hasNote && fromSummary.length) b.openItems = fromSummary
+  // Your last asks are no news right after a compaction: open the pane only for open work.
+  if (b.openItems.length) await showBrief($, { ...b, awayHours: 0 })
+}
+
+/** The Compact button. The engine skips this mod's own session.compact hook for the call, so its steps run here. */
+async function compactNow($: $, cwd: string) {
+  $.ui.toast('Compacting the conversation…', { timeoutMs: 60_000 })
+  try {
+    const hasNote = await writeCompactNote($, cwd)
+    const r = await $.session.compact()
+    if (r.skip !== undefined) return $.ui.toast(`Not compacted: ${r.skip}`, { timeoutMs: 8000 })
+    const k = (t: number) => `${Math.round(t / 1000)}k`
+    $.ui.toast(r.tokensBefore && r.tokensAfter ? `Compacted: ${k(r.tokensBefore)} → ${k(r.tokensAfter)} tokens` : 'Compacted', { timeoutMs: 6000 })
+    await afterCompact($, cwd, r.messages, hasNote)
+  } catch (err) {
+    const why = err instanceof Error && err.message ? `: ${err.message}` : ''
+    $.ui.toast(`Couldn't compact${why}. Try /compact.`, { timeoutMs: 10_000 })
+  }
 }
 
 // ── register ────────────────────────────────────────────────────
@@ -1043,21 +1115,10 @@ export const register: Register = on => {
   })
 
   on('session.compact', async ($, e, next) => {
-    // Before compacting: save a handoff while the full transcript is still there.
-    if (!e.agentId && cwd) {
-      const r = await $.model.fork({
-        prompt: 'Write a handoff note so this work can continue after the context is compacted. Markdown only, no preamble. Sections: "## Open items" (max 5 "- " bullets, most important first, concrete file/page names) and "## Decisions" (max 5 bullets).',
-      })
-      if (r.isAnswered) {
-        try { await $.fs.write(`${cwd}/.claude/handoff.md`, `<!-- oneliner ${new Date().toISOString()} -->\n${r.text.trim()}\n`) } catch {}
-      }
-    }
+    const isMain = !e.agentId && e.trigger !== 'precompute'
+    const hasNote = isMain ? await writeCompactNote($, cwd).catch(() => false) : false
     const result = await next(e)
-    if (!e.agentId && cwd) {
-      await update($, cache, c => ({ ...c, lastTurnAt: null, readPercent: null }))
-      void refreshLimit($)
-      void buildBrief($, cwd, undefined, await $.clock.now()).then(b => showBrief($, b))
-    }
+    if (isMain && result.skip === undefined) await afterCompact($, cwd, result.messages, hasNote)
     return result
   })
 
@@ -1313,7 +1374,7 @@ export const register: Register = on => {
         id: 'context',
         text: `ctx ${pct}%${k}`,
         color: pct >= CONTEXT_RED_PCT ? 'error' : pct >= CONTEXT_YELLOW_PCT ? 'warning' : 'success',
-        button: isContextRed ? { label: 'Compact', onPress: () => void $.session.compact() } : undefined,
+        button: isContextRed ? { label: 'Compact', onPress: () => void compactNow($, cwd) } : undefined,
       })
     }
 
@@ -1343,7 +1404,7 @@ export const register: Register = on => {
           ...(!cold && cols >= SWITCH_HINT_COLS && share >= CACHE_RED_SHARE && (ctx.tokens ?? 0) >= SWITCH_HINT_TOKENS
             ? [{ text: ` · switch re-sends ${Math.round((ctx.tokens ?? 0) / 1000)}k`, dim: true, drop: 1 }] : []),
         ],
-        button: timeTone === 'error' && !isContextRed && !c.resetReason ? { label: 'Compact', onPress: () => void $.session.compact() } : undefined,
+        button: timeTone === 'error' && !isContextRed && !c.resetReason ? { label: 'Compact', onPress: () => void compactNow($, cwd) } : undefined,
       })
     }
 
