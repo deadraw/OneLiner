@@ -1,6 +1,6 @@
 # claude-code-oneliner
 
-**A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas — in one line above your prompt.**
+**A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas - in one line above your prompt.**
 
 ![oneliner in Claude Code: green, yellow, red, the next list and graded ideas](.github/assets/one-liner.gif)
 
@@ -28,7 +28,7 @@ Working with Claude Code all day, the same things keep costing time:
 | Segment | Shows | 🟢 | 🟡 | 🔴 |
 |---|---|---|---|---|
 | **git** | branch, changed files (Δ), unpushed (↑), behind (↓) | clean and pushed | changes not shipped / behind (+ **Ship** button) | merge conflict, rebase stopped halfway, diverged |
-| **dev** | your local dev server | running | — | build error (gray when off, + **Start**) |
+| **dev** | your local dev server | running | - | build error (gray when off, + **Start**) |
 | **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **Handoff** button) |
 | **ctx** | context window fill and tokens | ≤ 50% | 51–75% | ≥ 76% (+ **Compact** button) |
 | **cache** | minutes until the prompt cache expires · % of the last turn read from cache | ≥ half the lifetime left | 25–50% left | < 25% left, cold, or reset (+ **Compact**) |
@@ -75,7 +75,7 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 
 - 5-hour limit at 90%, or the forecast says full within 30 minutes.
 - A limit or credit error stopped your prompt: **switch model & resend**, or **resend at reset**.
-- Someone else pushed to your branch: "*Alex pushed 2 commits to main — pull before you continue*".
+- Someone else pushed to your branch: "*Alex pushed 2 commits to main - pull before you continue*".
 - Your dev server rebuilt (or broke) after Claude edited files.
 - A `/model` switch is about to drop a large warm cache.
 
