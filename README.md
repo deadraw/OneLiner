@@ -47,7 +47,7 @@ Working with Claude Code all day, the same things keep costing time:
 | **git** | branch, changed files (Δ), unpushed (↑), behind (↓) | clean and pushed | changes not shipped / behind (+ **Ship** button) | merge conflict, rebase stopped halfway, diverged |
 | **dev** | your local dev server | running | - | build error (gray when off, + **Start**) |
 | **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **Handoff** button) |
-| **ctx** | context window fill and tokens | ≤ 49% | 50–70% | ≥ 71% (+ **Compact** button) |
+| **ctx** | context window fill and tokens | ≤ 49% | 50–70% | ≥ 71% (+ **Handoff** and **Compact** buttons) |
 | **cache** | minutes until the prompt cache expires · % of the last turn read from cache | ≥ half the lifetime left | 25–50% left | < 25% left, cold, or reset (+ **Compact** from 30% context) |
 | **next** | options from Claude's last answer + ideas on request | | | |
 
@@ -57,6 +57,20 @@ Extras that appear only when relevant:
 - `· 7d 74%`: the weekly window, shown from 70%.
 - `· switch re-sends 306k`: what a `/model` switch would throw away (wide strip, warm cache, large context).
 - `cache reset · effort`: you changed effort, thinking or fast mode, which empties the conversation cache.
+
+### Hover for details
+
+In the desktop app, point at any part of the strip to see more, written into the same line (the parts to its right slide over while you hover):
+
+| Part | Hover shows |
+|---|---|
+| **git** | the first changed files, what's waiting to push or pull, the last commit |
+| **dev** | the server address, or the full build error |
+| **5h limit** | reset time, fill forecast, weekly window, and what this session has cost (`$2.43`) |
+| **ctx** | free space and window size, with **📝** (handoff) and **♻️** (compact) at any fill level |
+| **cache** | when it expires if you stay idle, and its lifetime |
+
+Token counts read the way you'd say them: `482k`, `1M`, `1.2M`.
 
 On a narrow window the strip first drops the optional extras (switch hint, `% read`, `7d`), then switches to short labels (`main 4Δ 2↑`, `5h 78% →03:03`, `⏱22m`), and only then drops whole parts: **dev**, **git**, **ctx**. **Limit** and **cache** always stay.
 
@@ -82,9 +96,9 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 | Command | Does |
 |---|---|
 | `/ship` | Commit (and optionally push). Runs your build first, writes the commit message, asks before pushing. Refuses during a conflict. |
-| `/handoff` | Updates your `CURRENT.md` / `HANDOFF.md` from the conversation, keeping its structure. Asks before writing, keeps a backup. |
+| `/handoff` | Writes or updates your `CURRENT.md` / `HANDOFF.md` from the conversation, keeping its structure; any conversation works, coding or not. A row under the strip asks **Write** / **Cancel**, then offers **Clear & continue** (clears the chat; Claude reads the handoff, tells you where you left off and proposes next steps, then waits for you), **Clear**, or **Not now**. Keeps a backup of the previous file. Also on the **Handoff** button (red ctx, or near the 5-hour wall) and **📝** in the ctx hover. |
 | `/limits` | A chart of the current 5-hour window: usage so far, pace, forecast, reset time, weekly window. |
-| `/brief` | Where you left off in this project: **Goal**, **Done** and up to three **Next** steps (each one click into the prompt box), plus branch, unpushed and changed files. Also opens by itself after 6+ hours away and after a compaction. |
+| `/brief` | Where you left off in this project: **Goal**, **Done** and up to three **Next** steps, each on its own line in full and one click (or key 1-3) into the prompt box; plus branch, unpushed and changed files and the last commit. Also opens by itself after 6+ hours away and after a compaction. |
 | `/strip` | Turn strip parts on or off (`/strip cache`, `/strip all`). Saved for all projects. |
 | `/strip demo green` | Sample values for screenshots: `green`, `yellow`, `red`, `next` (the list open), `ideas` (graded ideas), or `play` to loop through all of them for a screen recording. Buttons are off and nothing is spent; `/strip demo off` returns to your real values. |
 

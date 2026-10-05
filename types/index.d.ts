@@ -9,6 +9,10 @@ export type GitState = {
   conflicts: number
   /** An unfinished merge / rebase / cherry-pick / revert, else null. */
   operation: string | null
+  /** The first changed files' names, for the hover. */
+  files?: string[]
+  /** The last commit: subject · relative time. */
+  lastCommit?: string | null
 }
 
 export type DevState = {
@@ -36,6 +40,8 @@ export type ContextState = {
   percent: number | null
   tokens: number | null
   window: number | null
+  /** What this session has cost so far, in US dollars (as /cost totals it). */
+  usd?: number | null
 }
 
 export type CacheState = {
@@ -66,6 +72,11 @@ export type NextState = {
   /** The model that answered the last turn (what a cached suggestion runs on). */
   model: string | null
 }
+
+/** The handoff flow in the strip's row: the draft to confirm, then the saved file. */
+export type HandoffStep =
+  | { stage: 'draft'; path: string; name: string; text: string; previous: string; added: number; removed: number; isNew: boolean }
+  | { stage: 'saved'; path: string; name: string }
 
 export type Brief = {
   project: string
@@ -103,6 +114,8 @@ declare module 'claude-code' {
       isWritingHandoff: boolean
       /** After a marketplace install, until answered: the strip's "keep up to date automatically?" row. */
       autoUpdateOffer: boolean
+      /** The handoff in progress: a draft waiting for Write, then saved (Clear & continue / Clear offered). */
+      handoffStep: HandoffStep | null
       /** /strip demo: sample values for screenshots (green, yellow, red, next, ideas), or null. */
       demo: string | null
       now: number

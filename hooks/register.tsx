@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Brief, CacheState, ContextState, DevState, GitState, LimitState, NextState } from '../types'
+import type { Brief, HandoffStep, CacheState, ContextState, DevState, GitState, LimitState, NextState } from '../types'
 
 const CACHE_TTL_MIN = 60 // subscription default
 const CACHE_TTL_OVERAGE_MIN = 5 // extra usage / reported 5m
@@ -55,6 +55,7 @@ const nextSteps = atom({ plugin: 'oneliner', key: 'next' } as const, {
 const remoteSeen = atom({ plugin: 'oneliner', key: 'remoteSeen' } as const, null as string | null)
 const isWritingHandoff = atom({ plugin: 'oneliner', key: 'isWritingHandoff' } as const, false)
 const autoUpdateOffer = atom({ plugin: 'oneliner', key: 'autoUpdateOffer' } as const, false)
+const handoffStep = atom({ plugin: 'oneliner', key: 'handoffStep' } as const, null as HandoffStep | null)
 const demo = atom({ plugin: 'oneliner', key: 'demo' } as const, null as string | null)
 const hidden = atom({ plugin: 'oneliner', key: 'hidden' } as const, [] as string[])
 const stripMenu = atom({ plugin: 'oneliner', key: 'isStripMenuOpen' } as const, false)
@@ -148,6 +149,36 @@ function summaryItems(summary: string): string[] {
 
 const HANDOFF_BACKUP = '.claude/handoff-backup.md'
 
+/** After a handoff: /clear, and optionally start the fresh conversation from the handoff file. */
+async function clearAfterHandoff($: $, name: string, isContinuing: boolean) {
+  await update($, handoffStep, () => null)
+  try {
+    await $.command.run({ command: 'clear' })
+  } catch {
+    void $.prompt.fill({ text: '/clear', mode: 'replace' })
+    return void $.ui.toast('Press Enter to clear; then ask Claude to continue from the handoff.', { timeoutMs: 8000 })
+  }
+  if (!isContinuing) return
+  // Sent as your own words (no plugin frame). The ./ path keeps a fresh conversation from guessing
+  // another one; it reports and proposes, and you confirm, since a handoff can misread the next step.
+  const text = `Read ./${name.replace(/\\/g, '/')} and then tell me briefly where we left off and propose the next steps. Don't start any work until I confirm which step to take.`
+  try { await $.prompt.submit({ text, asUser: true }) } catch { void $.prompt.fill({ text, mode: 'replace' }) }
+}
+
+/** The draft from the strip's Write button: saved (the previous copy kept), then Clear & continue / Clear is offered. */
+async function saveHandoff($: $, cwd: string) {
+  const step = await read($, handoffStep)
+  if (!step || step.stage !== 'draft') return
+  try {
+    if (step.previous) await $.fs.write(`${cwd}/${HANDOFF_BACKUP}`, step.previous)
+    await $.fs.write(step.path, step.text)
+  } catch {
+    await update($, handoffStep, () => null)
+    return void $.ui.toast(`Couldn't write ${step.path}`, { timeoutMs: 8000 })
+  }
+  await update($, handoffStep, (): HandoffStep => ({ stage: 'saved', path: step.path, name: step.name }))
+}
+
 async function writeHandoff($: $, cwd: string) {
   if (await read($, isWritingHandoff)) return
   // Your own file (the mod's auto note doesn't count); none yet → a new HANDOFF.md.
@@ -159,8 +190,8 @@ async function writeHandoff($: $, cwd: string) {
   $.ui.toast(`Writing ${name} from the conversation…`)
   try {
     const ask = before
-      ? `Update the project's handoff document so another session or AI agent can continue this work. Current ${name}:\n<<<\n${before}\n>>>\nRewrite it with everything this conversation changed: completed work, decisions, open issues and the exact next actions. Keep its structure, headings, tone and language; keep what is still true, remove what no longer is. Reply with the complete updated file only: no commentary, no code fences.`
-      : 'Write a handoff document (Markdown) so another session or AI agent can continue this project. Sections: "## Current state", "## Decisions", "## Known issues", "## Exact next actions" (numbered). Concrete, current, no commentary, no code fences.'
+      ? `Update the project's handoff document so another session or AI agent can continue this work. Current ${name}:\n<<<\n${before}\n>>>\nRewrite it with everything this conversation changed: completed work, decisions, open issues and the exact next actions. Keep its structure, headings, tone and language; keep what is still true, remove what no longer is. Reply with the complete updated file only, starting with its first line: no commentary, no chat, no code fences.`
+      : 'Write a handoff document (Markdown) of this conversation, so a fresh session can pick it up. Any conversation counts, coding or not: never refuse, never answer in chat. Start with "# Handoff", then: "## Topic" (what this conversation is about), "## Current state" (what was done or found), "## Decisions", "## Open questions", "## Next steps" (numbered; "None" when there are none). Concrete, current, no commentary, no code fences.'
     const r = await $.model.fork({ prompt: ask })
     if (!r.isAnswered) {
       return $.ui.toast(r.reason === 'nothing-to-fork'
@@ -169,15 +200,14 @@ async function writeHandoff($: $, cwd: string) {
     }
     if (!r.text.trim()) return $.ui.toast(`Couldn't write ${name}: the model gave no answer`)
     const after = r.text.trim().replace(/^```(?:markdown|md)?\n|\n```$/g, '') + '\n'
+    // A document starts with a heading (or, for an update, the old file's first line); anything else is a chat reply.
+    const firstLine = (t: string) => t.trimStart().split('\n')[0]?.trim() ?? ''
+    if (!/^#/.test(firstLine(after)) && !(before && firstLine(after) === firstLine(before))) {
+      return $.ui.toast(`The model answered instead of writing ${name}. Try again, or ask Claude to write it.`, { timeoutMs: 8000 })
+    }
     const { added, removed } = lineDiff(before, after)
-    let choice: string
-    try {
-      choice = await $.ui.ask(`${existing ? 'Update' : 'Create'} ${name}? (+${added} −${removed} lines)`, { header: 'Handoff', options: ['Write it', 'Cancel'] })
-    } catch { return }
-    if (choice !== 'Write it') return
-    if (before) await $.fs.write(`${cwd}/${HANDOFF_BACKUP}`, before)
-    await $.fs.write(path, after)
-    $.ui.toast(`${name} ${existing ? 'updated' : 'created'} (+${added} −${removed})${before ? ` · previous copy in ${HANDOFF_BACKUP}` : ''}`, { timeoutMs: 8000 })
+    // Asked in a row under the strip, not a dialog: Write / Cancel, then Clear & continue / Clear.
+    await update($, handoffStep, (): HandoffStep => ({ stage: 'draft', path, name, text: after, previous: before, added, removed, isNew: !existing }))
   } finally {
     await update($, isWritingHandoff, () => false)
   }
@@ -263,9 +293,17 @@ async function refreshGit($: $): Promise<GitState> {
         } else if (line.trim() && !line.startsWith('#')) {
           next.changed += 1
           if (line.startsWith('u ')) next.conflicts += 1
+          // Porcelain v2: the path is the last field (a rename adds "\t<old path>").
+          const fieldsBefore = line.startsWith('1 ') ? 8 : line.startsWith('2 ') ? 9 : line.startsWith('u ') ? 10 : 1
+          const path = (line.split(' ').slice(fieldsBefore).join(' ').split('\t')[0] ?? '').trim()
+          if (path && (next.files ??= []).length < 3) next.files.push(path.split('/').pop() ?? path)
         }
       }
       next.operation = await gitOperation($)
+      try {
+        const log = await runGit($, ['log', '-1', '--format=%s · %ct']) // the age is drawn from the time, kept current
+        if (log.exitCode === 0 && log.stdout.trim()) next.lastCommit = log.stdout.trim()
+      } catch {}
     }
   } catch {}
   await update($, git, () => next)
@@ -437,7 +475,7 @@ async function refreshLimit($: $) {
   try {
     const usage = await $.session.usage()
     const ctx = usage.context
-    await update($, context, () => ({ percent: ctx.percent ?? null, tokens: ctx.tokens ?? null, window: ctx.window }))
+    await update($, context, () => ({ percent: ctx.percent ?? null, tokens: ctx.tokens ?? null, window: ctx.window, usd: usage.cost?.usd ?? null }))
     const five = usage.rateLimits.find(r => r.kind === 'five_hour') ?? usage.rateLimits[0]
     if (!five) return
     const isOverage = usage.rateLimits.some(r => (r.kind === 'five_hour' || r.kind === 'seven_day') && r.percentUsed >= 100)
@@ -570,6 +608,14 @@ function barRows(values: (number | null)[], rows: number): string[] {
   return out
 }
 
+/** How long ago, the short way: 5s, 7m, 2h, 3d, 4mo, 1y. */
+const shortAge = (ms: number) => {
+  const s = Math.max(0, Math.round(ms / 1000))
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86_400 ? `${Math.floor(s / 3600)}h`
+    : s < 30 * 86_400 ? `${Math.floor(s / 86_400)}d` : s < 365 * 86_400 ? `${Math.floor(s / (30 * 86_400))}mo` : `${Math.floor(s / (365 * 86_400))}y`
+}
+/** Token counts as people say them: 482k, 1M, 1.2M. */
+const tokensShort = (n: number) => n >= 999_500 ? `${+(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1000)}k`
 const hhmmAt = (ms: number) => hhmm(new Date(ms).toISOString())
 
 const hhmm = (iso: string) => {
@@ -616,7 +662,7 @@ async function markCacheReset($: $, reason: string) {
   await update($, cache, x => ({ ...x, resetReason: reason }))
   let tokens = 0
   try { tokens = (await $.session.usage()).context.tokens ?? 0 } catch {}
-  $.ui.toast(`${reason.charAt(0).toUpperCase() + reason.slice(1)} changed: the next message re-sends ${tokens ? `~${Math.round(tokens / 1000)}k tokens` : 'the whole conversation'} without cache`, { timeoutMs: 8000 })
+  $.ui.toast(`${reason.charAt(0).toUpperCase() + reason.slice(1)} changed: the next message re-sends ${tokens ? `~${tokensShort(tokens)} tokens` : 'the whole conversation'} without cache`, { timeoutMs: 8000 })
 }
 
 const ttlMinutes = (ttl: '5m' | '1h') => (ttl === '5m' ? 5 : 60)
@@ -734,6 +780,8 @@ const GRADE_COLORS: Record<number, string> = { 3: '#F7D35C', 2: '#C4D3E6', 1: '#
 const GRADE_STYLE = 'text' as 'text' | 'dot'
 // Screen 2 title gradient, left → right.
 const IDEAS_FROM = '#6a6ae4'
+// The desktop app's strip frame, so a hover detail covers what is under it.
+const STRIP_FRAME_BG = '#212121'
 const CREDIT_COLOR = '#4a4a4a' // "v1.0.1 © deadraw" in the next list: darker than dim text, there if you look
 const IDEAS_TO ='#e34a9e'
 
@@ -1323,7 +1371,7 @@ export const register: Register = on => {
   on('classic.PreModelSwitch', async ($, e, next) => {
     await update($, cache, c => ({ ...c, reportedTtl: ttlMinutes(e.cache_ttl) }))
     if (e.prompt_cache_warm && e.context_tokens > 20_000) {
-      $.ui.toast(`Switching to ${e.to_model} drops the warm cache: ${Math.round(e.context_tokens / 1000)}k tokens re-cached (~$${e.estimated_cache_write_usd.toFixed(2)})`, { timeoutMs: 8000 })
+      $.ui.toast(`Switching to ${e.to_model} drops the warm cache: ${tokensShort(e.context_tokens)} tokens re-cached (~$${e.estimated_cache_write_usd.toFixed(2)})`, { timeoutMs: 8000 })
     }
     return next(e)
   })
@@ -1336,7 +1384,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'ship' }, async $ => {
     await ship($)
-    return { text: '' }
+    return {} // the pane or popup is the answer: no transcript line
   })
 
   on('command.run', { command: 'handoff' }, async $ => {
@@ -1346,7 +1394,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'limits' }, async $ => {
     await $.ui.open({ id: LIMITS_PANE, title: '5h limit' })
-    return { text: '' }
+    return {} // the pane or popup is the answer: no transcript line
   })
 
   on('ui.render', { component: 'Pane', requestId: LIMITS_PANE }, async ($, e) => {
@@ -1468,7 +1516,8 @@ export const register: Register = on => {
   on('command.run', { command: 'brief' }, async $ => {
     const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
     const isOpened = await openBrief($, cwd, stored, await $.clock.now())
-    return { text: isOpened ? 'Brief opened.' : 'Nothing to brief yet in this folder: no earlier messages, git history or handoff file.' }
+    // Opened: the pane says it all, no transcript line. Nothing to show: say why.
+    return isOpened ? {} : { text: 'Nothing to brief yet in this folder: no earlier messages, git history or handoff file.' }
   })
 
   // ── the strip ─────────────────────────────────────────────────
@@ -1483,6 +1532,9 @@ export const register: Register = on => {
     ])
     const demoLevel = (await read($, demo)) as DemoLevel | null
     if (demoLevel) ({ g, d, l, c, ctx, n } = demoFixture(demoLevel, at || Date.now(), n))
+    // Past its reset the window is empty, even before the next turn reports a new reading.
+    if (l.resetsAt && (at || Date.now()) >= Date.parse(l.resetsAt)) l = { ...l, percent: 0, resetsAt: null, samples: [] }
+    if (l.weekResetsAt && (at || Date.now()) >= Date.parse(l.weekResetsAt)) l = { ...l, weekPercent: 0, weekResetsAt: null }
     const cols = e.props.bodyColumns
     const isTight = cols < 60
 
@@ -1490,8 +1542,13 @@ export const register: Register = on => {
       id: string; text: string; color?: string; dim?: boolean
       extras?: { text: string; color?: string; dim?: boolean; drop?: number }[] // more numbers, each with its own color; `drop`: lower goes first when narrow
       button?: { label: string; onPress: () => void }
+      detail?: string // revealed after the text while the pointer is over the part (desktop)
+      detailMode?: 'push' | 'over' // push the parts to its right aside, or cover them to the strip's end
+      buttons?: { label: string; onPress: () => void }[] // more buttons after `button`
+      detailButtons?: { label: string; onPress: () => void }[] // actions offered only on hover
     }
     const segs: Seg[] = []
+    const segTextLen = (s: Seg) => s.text.length + (s.extras ?? []).reduce((n, x) => n + x.text.length, 0)
 
     // git
     if (g.isRepo) {
@@ -1511,6 +1568,15 @@ export const register: Register = on => {
         color: isBroken || isDiverged ? 'error' : dirty || g.behind ? 'warning' : g.hasUpstream ? 'success' : undefined,
         dim: !isBroken && !isDiverged && !dirty && !g.behind && !g.hasUpstream,
         button: dirty && !shipping && !isBroken && !isDiverged ? { label: 'Ship', onPress: () => void ship($) } : undefined,
+        detail: [
+          g.files?.length ? `${g.files.join(', ')}${g.changed > g.files.length ? ` +${g.changed - g.files.length} more` : ''}` : '',
+          g.ahead ? `${g.ahead} to push` : '',
+          g.behind ? `${g.behind} to pull` : '',
+          !g.hasUpstream ? 'not on a remote yet' : '',
+          // The subject shortened, its age kept: "Hover details, handoff and clear flow… · 5 min ago".
+          g.lastCommit ? `last: ${g.lastCommit.replace(/^(.*) · (\d+)$/, (_, subject: string, secs: string) => `${shortLabel(subject, 40)} · ${shortAge(at - Number(secs) * 1000)} ago`)}` : '',
+        ].filter(Boolean).join(' · '),
+        detailMode: 'push',
       })
     }
 
@@ -1527,6 +1593,10 @@ export const register: Register = on => {
       segs.push({
         id: 'dev', text: s.text, color: 'color' in s ? s.color : undefined, dim: 'dim' in s && s.dim,
         button: d.status === 'down' ? { label: 'Start', onPress: () => void startDev($, cwd) } : undefined,
+        detail: d.status === 'error' ? (d.error ?? 'see the dev server output')
+          : d.status === 'up' ? `http://localhost:${d.port}`
+          : d.status === 'down' ? `localhost:${d.port} is not running` : '',
+        detailMode: 'push',
       })
     }
 
@@ -1552,6 +1622,12 @@ export const register: Register = on => {
         button: (tone === 'error' || (fullAt !== null && fullAt - at < 60 * 60_000)) && !writingHandoff
           ? { label: 'Handoff', onPress: () => void writeHandoff($, cwd) }
           : undefined,
+        detail: [
+          l.resetsAt ? `resets ${hhmm(l.resetsAt)}` : '',
+          fullAt !== null ? `full ~${hhmmAt(fullAt)}` : '',
+          l.weekPercent !== null ? `7d ${Math.round(l.weekPercent)}%` : '',
+          ctx.usd ? `$${ctx.usd.toFixed(2)}` : '',
+        ].filter(Boolean).join(' · '),
       })
     }
 
@@ -1559,12 +1635,23 @@ export const register: Register = on => {
     const isContextRed = ctx.percent !== null && Math.round(ctx.percent) >= CONTEXT_RED_PCT
     if (ctx.percent !== null) {
       const pct = Math.round(ctx.percent)
-      const k = ctx.tokens !== null && !isTight ? ` · ${Math.round(ctx.tokens / 1000)}k` : ''
+      const k = ctx.tokens !== null && !isTight ? ` · ${tokensShort(ctx.tokens)}` : ''
       segs.push({
         id: 'context',
         text: `ctx ${pct}%${k}`,
         color: pct >= CONTEXT_RED_PCT ? 'error' : pct >= CONTEXT_YELLOW_PCT ? 'warning' : 'success',
-        button: isContextRed ? { label: 'Compact', onPress: () => void compactNow($) } : undefined,
+        button: isContextRed && !writingHandoff ? { label: 'Handoff', onPress: () => void writeHandoff($, cwd) } : undefined,
+        buttons: isContextRed ? [{ label: 'Compact', onPress: () => void compactNow($) }] : undefined,
+        detail: [
+          `${100 - pct}% free`,
+          ctx.window ? `of ${tokensShort(ctx.window)}` : '',
+        ].filter(Boolean).join(' '),
+        // On hover at any fill: the same two, as icons (handoff, compact).
+        detailButtons: isContextRed ? undefined : [
+          ...(writingHandoff ? [] : [{ label: '📝', onPress: () => void writeHandoff($, cwd) }]),
+          { label: '♻️', onPress: () => void compactNow($) },
+        ],
+        detailMode: 'push',
       })
     }
 
@@ -1592,10 +1679,17 @@ export const register: Register = on => {
           ...(!cold && !isTight && c.readPercent !== null ? [{ text: ` · ${c.readPercent}% read`, color: readTone, drop: 2 }] : []),
           // A /model switch throws this warm cache away; say how much it would re-send.
           ...(!cold && cols >= SWITCH_HINT_COLS && share >= CACHE_RED_SHARE && (ctx.tokens ?? 0) >= SWITCH_HINT_TOKENS
-            ? [{ text: ` · switch re-sends ${Math.round((ctx.tokens ?? 0) / 1000)}k`, dim: true, drop: 1 }] : []),
+            ? [{ text: ` · switch re-sends ${tokensShort(ctx.tokens ?? 0)}`, dim: true, drop: 1 }] : []),
         ],
         // On a small context, re-sending it costs less than a compaction (which reads it all and writes a summary).
         button: timeTone === 'error' && !isContextRed && !c.resetReason && (ctx.percent ?? 0) >= CACHE_COMPACT_MIN_PCT ? { label: 'Compact', onPress: () => void compactNow($) } : undefined,
+        detail: [
+          cold || c.resetReason
+            ? `the next message re-sends ${ctx.tokens ? `~${tokensShort(ctx.tokens)}` : 'the conversation'} at full price`
+            : c.lastTurnAt ? `expires ${hhmmAt(c.lastTurnAt + ttl * 60_000)} if idle` : '',
+          `${ttl}m lifetime${isShort ? ' (extra usage)' : ''}`,
+        ].filter(Boolean).join(' · '),
+        detailMode: 'push',
       })
     }
 
@@ -1609,12 +1703,14 @@ export const register: Register = on => {
     if (demoLevel) {
       for (const s of segs) {
         if (s.button && s.id !== 'next') s.button = { ...s.button, onPress: () => $.ui.toast('Demo mode: buttons are off. /strip demo off to exit') }
+        if (s.buttons) s.buttons = s.buttons.map(b => ({ ...b, onPress: () => $.ui.toast('Demo mode: buttons are off. /strip demo off to exit') }))
       }
     }
 
     // Narrow: first the optional extras (switch hint, then % read, then 7d), then whole parts:
     // dev, git, context, next. Limit + cache always stay.
-    const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + 5 : 0) + 3
+    const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + 5 : 0)
+      + (s.buttons ?? []).reduce((w, b) => w + b.label.length + 5, 0) + 3
     const total = (list: Seg[]) => list.reduce((n, s) => n + width(s), 0)
     let shown = segs.filter(s => !hiddenParts.includes(s.id))
     for (const level of [1, 2, 3]) {
@@ -1644,21 +1740,36 @@ export const register: Register = on => {
     const leftSegs = shown.filter(s => s.id !== 'next')
     const strip = (
       <Box flexDirection="row" width={cols} justifyContent="space-between">
-        <Box flexDirection="row" gap={1}>
+        {/* Clipped at its edge: a long hover detail pushes the parts after it out of view, never into "next". */}
+        <Box flexDirection="row" flexShrink={1} overflow="hidden">
         {leftSegs.map((s, i) => (
-          <Box key={s.id} flexDirection="row" gap={1}>
+          // No gaps between parts: each part's hover area runs up to the next one, so crossing never drops the details.
+          <Box key={s.id} flexDirection="row" gap={1} paddingRight={1}>
             {i > 0 && <Text dimColor>│</Text>}
             <Box flexDirection="row">
               {s.text !== '' && <Text color={s.color} dimColor={s.dim} wrap="truncate">{s.text}</Text>}
               {(s.extras ?? []).map(x => <Text color={x.color} dimColor={x.dim} wrap="truncate">{x.text}</Text>)}
+              {s.detail && (
+                s.detailMode === 'over'
+                  // Written over the parts to its right while hovered, on the same line: nothing moves.
+                  ? <Box display="none" position="absolute" top={0} left={segTextLen(s)} width={s.detail.length + 3} backgroundColor={STRIP_FRAME_BG} hover={{ display: 'flex' }}>
+                      <Text dimColor wrap="truncate">{` · ${s.detail}`}</Text>
+                    </Box>
+                  // Pushes the parts to its right aside while hovered.
+                  : <Box display="none" gap={1} hover={{ display: 'flex' }}>
+                      <Text dimColor wrap="truncate">{` · ${s.detail}`}</Text>
+                      {(s.detailButtons ?? []).map((b, i) => <Button key={`${s.id}-hover-btn-${i}`} label={b.label} onPress={b.onPress} />)}
+                    </Box>
+              )}
             </Box>
             {s.button && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
+            {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
           </Box>
         ))}
         </Box>
         {nextSeg?.button && (
           // A Button can't be colored: "next" carries the gradient, the arrow is a full bracketed button.
-          <Box flexDirection="row" gap={1}>
+          <Box flexDirection="row" gap={1} flexShrink={0} marginLeft={1}>
             {gradient(nextSeg.button.label.replace(/\s*[▾▴]$/, ''), IDEAS_FROM, IDEAS_TO)}
             <Button key="next-btn" plain label={n.isOpen ? ' ▴  ' : ' ▾  '} onPress={nextSeg.button.onPress} />
           </Box>
@@ -1666,6 +1777,30 @@ export const register: Register = on => {
       </Box>
     )
     // Once after a marketplace install: auto-update, answered right here (never through the model).
+    // The handoff, one step at a time in a row under the strip: Write / Cancel, then start over from it or keep going.
+    const step = demoLevel ? null : await read($, handoffStep)
+    if (!n.isOpen && !isMenuOpen && step) {
+      const close = () => void update($, handoffStep, () => null)
+      return (
+        <Box flexDirection="column">
+          {strip}
+          {step.stage === 'draft' ? (
+            <Box flexDirection="row" gap={1}>
+              <Text dimColor>{`${step.name} ready · ${step.isNew ? `new file · ${step.added} lines` : `+${step.added} −${step.removed} lines`}`}</Text>
+              <Button key="ho-write" variant="primary" label="Write" onPress={() => void saveHandoff($, cwd)} />
+              <Button key="ho-cancel" label="Cancel" onPress={close} />
+            </Box>
+          ) : (
+            <Box flexDirection="row" gap={1}>
+              <Text dimColor>{`${step.name} saved`}</Text>
+              <Button key="ho-continue" variant="primary" label="Clear & continue" onPress={() => void clearAfterHandoff($, step.name, true)} />
+              <Button key="ho-clear" label="Clear" onPress={() => void clearAfterHandoff($, step.name, false)} />
+              <Button key="ho-later" label="Not now" onPress={close} />
+            </Box>
+          )}
+        </Box>
+      )
+    }
     if (!n.isOpen && !isMenuOpen && isOfferingUpdate && !demoLevel) {
       return (
         <Box flexDirection="column">
@@ -1689,7 +1824,7 @@ export const register: Register = on => {
     const goTo = (view: 'main' | 'suggest') => update($, nextSteps, s => ({ ...s, view }))
     const via = n.aiVia ?? suggestVia(c, l, at)
     const runsOn = via === 'cache'
-      ? `${shortModel(n.model)} · from cache${ctx.tokens ? ` ~${Math.round(ctx.tokens / 1000)}k` : ''}`
+      ? `${shortModel(n.model)} · from cache${ctx.tokens ? ` ~${tokensShort(ctx.tokens)}` : ''}`
       : `${shortModel(SMART_MODEL)} · ~3k`
 
     // Layout shared by both screens: a title row (meta on the right), indented rows, a thin rule, the exit row.
@@ -1807,7 +1942,11 @@ export const register: Register = on => {
     if (!b) return <Text dimColor>No brief yet.</Text>
     const fill = (step: string) => void $.prompt.fill({ text: step, mode: 'replace' })
     const firstStep = b.next[0]
-    const label = (text: string) => <Text dimColor>{text.padEnd(6)}</Text>
+    const label = (text: string) => <Box flexShrink={0} width={6}><Text dimColor>{text}</Text></Box>
+    // A labelled line whose text wraps in full instead of being cut off.
+    const line = (name: string, text: string, isDim = false) => (
+      <Box flexDirection="row">{label(name)}<Box flexShrink={1}><Text dimColor={isDim} wrap="wrap">{text}</Text></Box></Box>
+    )
     const repo = b.branch
       ? [b.branch, b.ahead ? `${b.ahead} unpushed` : '', b.changed ? `${b.changed} changed` : ''].filter(Boolean).join(' · ')
       : ''
@@ -1815,17 +1954,19 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={0}>
         <Text bold>{b.project}{b.awayHours ? ` · away ${b.awayHours}h` : ''}</Text>
         {b.status === 'loading' && <Text dimColor italic>  summarizing…</Text>}
-        {b.goal && <Box flexDirection="row">{label('Goal')}<Text wrap="truncate">{b.goal}</Text></Box>}
-        {b.done && <Box flexDirection="row">{label('Done')}<Text wrap="truncate">{b.done}</Text></Box>}
+        {b.goal && line('Goal', b.goal)}
+        {b.done && line('Done', b.done)}
+        {b.next.length > 0 && label('Next')}
         {b.next.map((step, i) => (
-          <Box key={`next-${i}`} flexDirection="row">
-            {label(i === 0 ? 'Next' : '')}
-            <Button key={`next-${i}-b`} plain hotkey={String(i + 1)} label={step} onPress={() => fill(step)} />
+          // One step per line, stacked; the number is the button (and hotkey), the text wraps in full beside it.
+          <Box key={`next-${i}`} flexDirection="row" gap={1} marginLeft={2}>
+            <Box flexShrink={0}><Button key={`next-${i}-b`} plain hotkey={String(i + 1)} label="›" onPress={() => fill(step)} /></Box>
+            <Box flexShrink={1}><Text wrap="wrap">{step}</Text></Box>
           </Box>
         ))}
         {b.status === 'none' && <Text dimColor>  Nothing open found.</Text>}
-        {repo && <Box flexDirection="row">{label('Repo')}<Text dimColor wrap="truncate">{repo}</Text></Box>}
-        {b.commits[0] && <Box flexDirection="row">{label('Last')}<Text dimColor wrap="truncate">{b.commits[0]}</Text></Box>}
+        {repo && line('Repo', repo, true)}
+        {b.commits[0] && line('Last', b.commits[0], true)}
         <Box flexDirection="row" gap={1} marginTop={1}>
           {firstStep && <Button key="continue" variant="primary" label="Continue with 1" onPress={() => fill(firstStep)} />}
           <Button key="dismiss" role="dismiss" label="Dismiss" onPress={() => void $.ui.close({ id: BRIEF_PANE })} />
