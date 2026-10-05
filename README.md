@@ -2,6 +2,8 @@
 
 **A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas — in one line above your prompt.**
 
+![oneliner in Claude Code: green, yellow, red, the next list and graded ideas](.github/assets/one-liner.gif)
+
 ![All good: everything green](.github/assets/strip_green.png)
 ![Getting tight: uncommitted work, limit filling before reset, cache cooling](.github/assets/strip_yellow.png)
 ![Needs you now: merge conflict, limit almost out, context nearly full](.github/assets/strip_red.png)
