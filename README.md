@@ -67,7 +67,7 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 | `/limits` | A chart of the current 5-hour window: usage so far, pace, forecast, reset time, weekly window. |
 | `/brief` | Where you left off in this project: open items from your handoff file, your last requests, last commits, uncommitted files. Also opens by itself after a gap of 6+ hours. |
 | `/strip` | Turn strip parts on or off (`/strip cache`, `/strip all`). Saved for all projects. |
-| `/strip demo green` | Sample values for screenshots: `green`, `yellow`, `red`, `next` (the list open), `ideas` (graded ideas). Buttons are off and nothing is spent; `/strip demo off` returns to your real values. |
+| `/strip demo green` | Sample values for screenshots: `green`, `yellow`, `red`, `next` (the list open), `ideas` (graded ideas), or `play` to loop through all of them for a screen recording. Buttons are off and nothing is spent; `/strip demo off` returns to your real values. |
 
 ## Popups (only when they matter)
 

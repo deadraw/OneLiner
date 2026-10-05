@@ -602,6 +602,10 @@ function cacheShare(c: CacheState, l: LimitState, at: number): number {
 // ── /strip demo: sample values for screenshots ──────────────────
 
 const DEMO_LEVELS = ['green', 'yellow', 'red', 'next', 'ideas'] as const
+// /strip demo play: the story a short GIF tells, looped. [level, how long it stays, ms]
+const DEMO_PLAY: [(typeof DEMO_LEVELS)[number], number][] = [
+  ['green', 2500], ['yellow', 2500], ['red', 2500], ['next', 2500], ['ideas', 3500],
+]
 type DemoLevel = (typeof DEMO_LEVELS)[number]
 
 /** Sample state for one demo level, drawn by the real strip code. Times are relative to now. */
@@ -889,6 +893,7 @@ export const register: Register = on => {
   // The cache timer runs from the START of a request (API docs), so remember when the last one started.
   let lastRequestAt: number | null = null
   let lastEffort: string | null = null // the effort the last main request used
+  let demoTimer: { cancel: () => void } | null = null // /strip demo play
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
@@ -899,7 +904,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'strip',
       description: 'Turn strip parts on or off (all projects)',
-      argumentHint: '[git|dev|limit|context|cache|next|all] or demo [green|yellow|red|next|ideas|off]',
+      argumentHint: '[git|dev|limit|context|cache|next|all] or demo [green|yellow|red|next|ideas|play|off]',
     })
     const saved = await $.store.get(HIDDEN_KEY)
     await update($, hidden, () => (Array.isArray(saved) ? saved.filter(x => typeof x === 'string') : []))
@@ -1175,12 +1180,25 @@ export const register: Register = on => {
     }
     if (word.startsWith('demo')) {
       const level = word.split(/\s+/)[1] ?? 'green'
+      demoTimer?.cancel() // any new demo command stops a running play
+      demoTimer = null
+      if (level === 'play') {
+        await update($, stripMenu, () => false)
+        let i = 0
+        const step = () => {
+          const [lvl, ms] = DEMO_PLAY[i]
+          void update($, demo, () => lvl)
+          demoTimer = $.clock.after(ms, () => { i = (i + 1) % DEMO_PLAY.length; step() })
+        }
+        step()
+        return { text: 'Demo playing: green → yellow → red → next → ideas, looped. /strip demo off to stop.' }
+      }
       if (level === 'off') {
         await update($, demo, () => null)
         return { text: 'Demo off: the strip shows your real values again.' }
       }
       if (!(DEMO_LEVELS as readonly string[]).includes(level)) {
-        return { text: `Demo levels: ${DEMO_LEVELS.join(', ')}, or off.` }
+        return { text: `Demo levels: ${DEMO_LEVELS.join(', ')}, play, or off.` }
       }
       await update($, stripMenu, () => false)
       await update($, demo, () => level)
