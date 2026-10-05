@@ -55,6 +55,7 @@ const nextSteps = atom({ plugin: 'oneliner', key: 'next' } as const, {
 const remoteSeen = atom({ plugin: 'oneliner', key: 'remoteSeen' } as const, null as string | null)
 const isWritingHandoff = atom({ plugin: 'oneliner', key: 'isWritingHandoff' } as const, false)
 const autoUpdateOffer = atom({ plugin: 'oneliner', key: 'autoUpdateOffer' } as const, false)
+const rowAsk = atom({ plugin: 'oneliner', key: 'rowAsk' } as const, null as { text: string; options: string[] } | null)
 const handoffStep = atom({ plugin: 'oneliner', key: 'handoffStep' } as const, null as HandoffStep | null)
 const demo = atom({ plugin: 'oneliner', key: 'demo' } as const, null as string | null)
 const hidden = atom({ plugin: 'oneliner', key: 'hidden' } as const, [] as string[])
@@ -324,6 +325,30 @@ async function commitMessage($: $): Promise<string> {
   return r.isAnswered && r.text.trim() ? r.text.trim() : fallback
 }
 
+// ── questions in a row under the strip ──────────────────────────
+// Never Claude Code's question dialog: that one adds "Other" / "Skip", and asked
+// near the end of a turn its answer reaches the model.
+
+let answerRowAsk: ((choice: string | null) => void) | null = null
+
+/** Asks in a row under the strip; resolves to the chosen option, or null when dismissed. */
+async function askInRow($: $, text: string, options: string[]): Promise<string | null> {
+  answerRowAsk?.(null) // a newer question replaces an unanswered one
+  const choice = new Promise<string | null>(resolve => { answerRowAsk = resolve })
+  await update($, rowAsk, () => ({ text, options }))
+  const result = await choice
+  await update($, rowAsk, () => null)
+  return result
+}
+
+/** A row button's answer; after a reload nobody waits for it, so the row just closes. */
+async function answerRow($: $, choice: string | null) {
+  const resolve = answerRowAsk
+  answerRowAsk = null
+  if (resolve) resolve(choice)
+  else await update($, rowAsk, () => null)
+}
+
 async function ship($: $) {
   if (await read($, isShipping)) return
   const g = await refreshGit($)
@@ -335,13 +360,8 @@ async function ship($: $) {
   const question = g.changed > 0
     ? `Ship ${g.changed} changed file${g.changed === 1 ? '' : 's'} on ${g.branch}?`
     : `Push ${g.ahead} commit${g.ahead === 1 ? '' : 's'} on ${g.branch}?`
-  let choice: string
-  try {
-    choice = await $.ui.ask(question, { header: 'Ship', options })
-  } catch {
-    return // dismissed
-  }
-  if (!options.includes(choice)) return
+  const choice = await askInRow($, question, options)
+  if (!choice || !options.includes(choice)) return
 
   await update($, isShipping, () => true)
   try {
@@ -559,10 +579,8 @@ async function offerResend($: $, errorText: string, prompt: string) {
   if (target) options.push(`Switch to ${target} & resend`)
   if (resetAt && isAccountWide) options.push(`Resend at ${hhmmAt(resetAt + 60_000)}`)
   if (options.length === 0) return
-  let choice: string
-  try {
-    choice = await $.ui.ask(`That prompt didn't run (${(errorText.split(/[.·]/)[0] ?? errorText).trim()}). Send it again?`, { header: 'Resend', options: [...options, 'Leave it'] })
-  } catch { return }
+  const choice = await askInRow($, `That prompt didn't run (${(errorText.split(/[.·]/)[0] ?? errorText).trim()}). Send it again?`, options)
+  if (!choice) return
   if (target && choice === `Switch to ${target} & resend`) {
     try {
       await $.command.run({ command: 'model', args: target })
@@ -1777,6 +1795,22 @@ export const register: Register = on => {
       </Box>
     )
     // Once after a marketplace install: auto-update, answered right here (never through the model).
+    // A question in a row under the strip (Ship, resend): its options, the first one primary, and Cancel.
+    const ask = demoLevel ? null : await read($, rowAsk)
+    if (!n.isOpen && !isMenuOpen && ask) {
+      return (
+        <Box flexDirection="column">
+          {strip}
+          <Box flexDirection="row" gap={1}>
+            <Text dimColor wrap="truncate">{ask.text}</Text>
+            {ask.options.map((option, i) => (
+              <Button key={`ask-${i}`} variant={i === 0 ? 'primary' : undefined} label={option} onPress={() => void answerRow($, option)} />
+            ))}
+            <Button key="ask-cancel" label="Cancel" onPress={() => void answerRow($, null)} />
+          </Box>
+        </Box>
+      )
+    }
     // The handoff, one step at a time in a row under the strip: Write / Cancel, then start over from it or keep going.
     const step = demoLevel ? null : await read($, handoffStep)
     if (!n.isOpen && !isMenuOpen && step) {

@@ -116,6 +116,8 @@ declare module 'claude-code' {
       autoUpdateOffer: boolean
       /** The handoff in progress: a draft waiting for Write, then saved (Clear & continue / Clear offered). */
       handoffStep: HandoffStep | null
+      /** A question shown in a row under the strip (Ship, resend), until answered. */
+      rowAsk: { text: string; options: string[] } | null
       /** /strip demo: sample values for screenshots (green, yellow, red, next, ideas), or null. */
       demo: string | null
       now: number
