@@ -49,6 +49,7 @@ const nextSteps = atom({ plugin: 'oneliner', key: 'next' } as const, {
 } as NextState)
 const remoteSeen = atom({ plugin: 'oneliner', key: 'remoteSeen' } as const, null as string | null)
 const isWritingHandoff = atom({ plugin: 'oneliner', key: 'isWritingHandoff' } as const, false)
+const autoUpdateOffer = atom({ plugin: 'oneliner', key: 'autoUpdateOffer' } as const, false)
 const demo = atom({ plugin: 'oneliner', key: 'demo' } as const, null as string | null)
 const hidden = atom({ plugin: 'oneliner', key: 'hidden' } as const, [] as string[])
 const stripMenu = atom({ plugin: 'oneliner', key: 'isStripMenuOpen' } as const, false)
@@ -898,33 +899,43 @@ const AUTO_UPDATE_ASKED_KEY = 'autoUpdate:asked' // one $.store value: asked onc
 type MarketplaceEntry = { source?: unknown; autoUpdate?: boolean }
 type Settings = Record<string, unknown> & { extraKnownMarketplaces?: Record<string, MarketplaceEntry> }
 
-/**
- * Installed from the marketplace, auto-update never decided: ask once and write the answer to
- * ~/.claude/settings.json (Claude Code leaves it off for marketplaces outside Anthropic's own).
- */
-async function offerAutoUpdate($: $) {
-  const root = $.plugin.root.replace(/\\/g, '/')
+/** ~/.claude/settings.json when OneLiner runs from a marketplace install; null for a git clone or plugin folder. */
+function marketplaceSettingsPath(pluginRoot: string): string | null {
+  const root = pluginRoot.replace(/\\/g, '/')
   const at = root.indexOf(`/plugins/cache/${MARKETPLACE}/`)
-  if (at < 0) return // git clone or plugin folder: updates come from git pull
-  if (await $.store.get(AUTO_UPDATE_ASKED_KEY)) return
-  const path = `${root.slice(0, at)}/settings.json`
-  let settings: Settings
-  try { settings = JSON.parse(String(await $.fs.read(path))) as Settings } catch { return }
-  const entry = settings.extraKnownMarketplaces?.[MARKETPLACE]
-  if (entry?.autoUpdate !== undefined) return void (await $.store.set(AUTO_UPDATE_ASKED_KEY, true)) // already decided
-  let choice: string
+  return at < 0 ? null : `${root.slice(0, at)}/settings.json`
+}
+
+/** The settings path when OneLiner was installed from the marketplace and auto-update is undecided; else null. */
+async function autoUpdateSettingsPath($: $): Promise<string | null> {
+  const path = marketplaceSettingsPath($.plugin.root)
+  if (!path) return null // git clone or plugin folder: updates come from git pull
+  if (await $.store.get(AUTO_UPDATE_ASKED_KEY)) return null
   try {
-    choice = await $.ui.ask('Keep OneLiner up to date automatically? New versions install when Claude Code starts.', {
-      header: 'OneLiner', options: ['Yes, auto-update', 'No, I\'ll update by hand'],
-    })
-  } catch { return }
+    const settings = JSON.parse(String(await $.fs.read(path))) as Settings
+    if (settings.extraKnownMarketplaces?.[MARKETPLACE]?.autoUpdate === undefined) return path
+  } catch { return null }
+  await $.store.set(AUTO_UPDATE_ASKED_KEY, true) // already decided in settings
+  return null
+}
+
+/**
+ * The answer from the strip's Yes / No row, written to ~/.claude/settings.json
+ * (Claude Code leaves auto-update off for marketplaces outside Anthropic's own).
+ * A row, not $.ui.ask: that dialog is a tool call; asked at the end of a turn, its answer went to the model.
+ */
+async function saveAutoUpdate($: $, isOn: boolean) {
+  await update($, autoUpdateOffer, () => false)
   await $.store.set(AUTO_UPDATE_ASKED_KEY, true)
-  const isOn = choice.startsWith('Yes')
-  settings.extraKnownMarketplaces = {
-    ...settings.extraKnownMarketplaces,
-    [MARKETPLACE]: { source: { source: 'git', url: MARKETPLACE_URL }, ...entry, autoUpdate: isOn },
-  }
+  const path = marketplaceSettingsPath($.plugin.root)
+  if (!path) return
   try {
+    const settings = JSON.parse(String(await $.fs.read(path))) as Settings
+    const entry = settings.extraKnownMarketplaces?.[MARKETPLACE]
+    settings.extraKnownMarketplaces = {
+      ...settings.extraKnownMarketplaces,
+      [MARKETPLACE]: { source: { source: 'git', url: MARKETPLACE_URL }, ...entry, autoUpdate: isOn },
+    }
     await $.fs.write(path, JSON.stringify(settings, null, 2) + '\n')
     $.ui.toast(isOn ? 'OneLiner will update itself when Claude Code starts.' : 'Auto-update off. The Update button in Plugins gets new versions.', { timeoutMs: 6000 })
   } catch {
@@ -1007,11 +1018,11 @@ export const register: Register = on => {
   let lastEffort: string | null = null // the effort the last main request used
   let demoTimer: { cancel: () => void } | null = null // /strip demo play
   let version = '' // from plugin.json, for the credit line
-  let hasOfferedAutoUpdate = false // once per session, after the first answer (the UI is up by then)
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
     try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch {}
+    void autoUpdateSettingsPath($).then(path => update($, autoUpdateOffer, () => path !== null))
     await $.command.register({ name: 'ship', description: 'Commit (and optionally push) the working tree' })
     await $.command.register({ name: 'brief', description: 'Show where you left off in this project' })
     await $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' })
@@ -1077,10 +1088,6 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId) return result
-    if (!hasOfferedAutoUpdate) {
-      hasOfferedAutoUpdate = true
-      void offerAutoUpdate($)
-    }
     const options = extractNextSteps(e.answer)
     await update($, nextSteps, () => ({
       isOpen: false, fromAnswer: options, ai: [], aiGrades: [], optionGrades: options.map(recommendedGrade), aiStatus: 'idle', aiVia: null,
@@ -1333,7 +1340,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [hiddenParts, isMenuOpen, writingHandoff] = await Promise.all([read($, hidden), read($, stripMenu), read($, isWritingHandoff)])
+    const [hiddenParts, isMenuOpen, writingHandoff, isOfferingUpdate] = await Promise.all([read($, hidden), read($, stripMenu), read($, isWritingHandoff), read($, autoUpdateOffer)])
     let [g, d, l, c, ctx, at, shipping, n] = await Promise.all([
       read($, git), read($, dev), read($, limit), read($, cache), read($, context), read($, now), read($, isShipping),
       read($, nextSteps),
@@ -1522,6 +1529,20 @@ export const register: Register = on => {
         )}
       </Box>
     )
+    // Once after a marketplace install: auto-update, answered right here (never through the model).
+    if (!n.isOpen && !isMenuOpen && isOfferingUpdate && !demoLevel) {
+      return (
+        <Box flexDirection="column">
+          {strip}
+          <Box flexDirection="row" gap={1}>
+            {gradient('OneLiner', IDEAS_FROM, IDEAS_TO)}
+            <Text dimColor>keep up to date automatically?</Text>
+            <Button key="au-yes" label="Yes" onPress={() => void saveAutoUpdate($, true)} />
+            <Button key="au-no" label="No" onPress={() => void saveAutoUpdate($, false)} />
+          </Box>
+        </Box>
+      )
+    }
     if (!n.isOpen && !isMenuOpen) return strip
 
     // The slide-up: picks fill the prompt (never send), 1–4 / s / 0 as hotkeys.

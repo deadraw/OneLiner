@@ -92,6 +92,8 @@ declare module 'claude-code' {
       remoteSeen: string | null
       /** True while /handoff is writing. */
       isWritingHandoff: boolean
+      /** After a marketplace install, until answered: the strip's "keep up to date automatically?" row. */
+      autoUpdateOffer: boolean
       /** /strip demo: sample values for screenshots (green, yellow, red, next, ideas), or null. */
       demo: string | null
       now: number
