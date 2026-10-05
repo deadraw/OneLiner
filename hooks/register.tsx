@@ -12,9 +12,9 @@ const LIMIT_RED_PCT = 86
 // Cache time, as a share of the cache lifetime (60m → ≥30m green, 15–29m yellow, <15m red).
 const CACHE_GREEN_SHARE = 0.5
 const CACHE_RED_SHARE = 0.25
-// Context window: ≤50 green, 51–75 yellow, ≥76 red (+ Compact).
-const CONTEXT_YELLOW_PCT = 51
-const CONTEXT_RED_PCT = 76
+// Context window: ≤49 green, 50–70 yellow, ≥71 red (+ Compact).
+const CONTEXT_YELLOW_PCT = 50
+const CONTEXT_RED_PCT = 71
 // Cache running out: offer Compact only from this context fill; below it, letting the cache rebuild is cheaper.
 const CACHE_COMPACT_MIN_PCT = 30
 // Model-switch hint on the cache segment: wide strips, warm cache, big context only.
@@ -1362,7 +1362,7 @@ export const register: Register = on => {
     }
 
     // context window
-    const isContextRed = ctx.percent !== null && ctx.percent >= CONTEXT_RED_PCT
+    const isContextRed = ctx.percent !== null && Math.round(ctx.percent) >= CONTEXT_RED_PCT
     if (ctx.percent !== null) {
       const pct = Math.round(ctx.percent)
       const k = ctx.tokens !== null && !isTight ? ` · ${Math.round(ctx.tokens / 1000)}k` : ''

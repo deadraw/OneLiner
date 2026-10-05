@@ -42,7 +42,7 @@ Working with Claude Code all day, the same things keep costing time:
 | **git** | branch, changed files (Δ), unpushed (↑), behind (↓) | clean and pushed | changes not shipped / behind (+ **Ship** button) | merge conflict, rebase stopped halfway, diverged |
 | **dev** | your local dev server | running | - | build error (gray when off, + **Start**) |
 | **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **Handoff** button) |
-| **ctx** | context window fill and tokens | ≤ 50% | 51–75% | ≥ 76% (+ **Compact** button) |
+| **ctx** | context window fill and tokens | ≤ 49% | 50–70% | ≥ 71% (+ **Compact** button) |
 | **cache** | minutes until the prompt cache expires · % of the last turn read from cache | ≥ half the lifetime left | 25–50% left | < 25% left, cold, or reset (+ **Compact** from 30% context) |
 | **next** | options from Claude's last answer + ideas on request | | | |
 
@@ -169,7 +169,7 @@ Everything tunable is a named setting at the top of [`hooks/register.tsx`](hooks
 | Setting | Default |
 |---|---|
 | `LIMIT_YELLOW_PCT`, `LIMIT_RED_PCT`, `LIMIT_WARN_PCT` | 71, 86, 90 |
-| `CONTEXT_YELLOW_PCT`, `CONTEXT_RED_PCT` | 51, 76 |
+| `CONTEXT_YELLOW_PCT`, `CONTEXT_RED_PCT` | 50, 71 |
 | `CACHE_GREEN_SHARE`, `CACHE_RED_SHARE` | 0.5, 0.25 |
 | `CACHE_COMPACT_MIN_PCT` | 30: below this context fill, a cold cache gets no Compact button (re-sending is cheaper) |
 | `GRADE_COLORS` | gold `#F7D35C`, silver `#C4D3E6`, bronze `#EE9D5B` |
