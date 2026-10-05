@@ -1,3 +1,5 @@
+![OneLiner: a live status strip for Claude Code with git, limits, context, cache and next steps](.github/assets/cover.jpg)
+
 # OneLiner
 
 **A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas - in one line above your prompt.**
