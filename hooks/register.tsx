@@ -914,8 +914,8 @@ async function offerAutoUpdate($: $) {
   if (entry?.autoUpdate !== undefined) return void (await $.store.set(AUTO_UPDATE_ASKED_KEY, true)) // already decided
   let choice: string
   try {
-    choice = await $.ui.ask('Keep oneliner up to date automatically? New versions install when Claude Code starts.', {
-      header: 'oneliner', options: ['Yes, auto-update', 'No, I\'ll update by hand'],
+    choice = await $.ui.ask('Keep OneLiner up to date automatically? New versions install when Claude Code starts.', {
+      header: 'OneLiner', options: ['Yes, auto-update', 'No, I\'ll update by hand'],
     })
   } catch { return }
   await $.store.set(AUTO_UPDATE_ASKED_KEY, true)
@@ -926,7 +926,7 @@ async function offerAutoUpdate($: $) {
   }
   try {
     await $.fs.write(path, JSON.stringify(settings, null, 2) + '\n')
-    $.ui.toast(isOn ? 'oneliner will update itself when Claude Code starts.' : 'Auto-update off. The Update button in Plugins gets new versions.', { timeoutMs: 6000 })
+    $.ui.toast(isOn ? 'OneLiner will update itself when Claude Code starts.' : 'Auto-update off. The Update button in Plugins gets new versions.', { timeoutMs: 6000 })
   } catch {
     $.ui.toast(`Couldn't save the choice to ${path}. See the README to set it by hand.`, { timeoutMs: 8000 })
   }

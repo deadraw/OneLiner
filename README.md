@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-e34a9e)](LICENSE)
 [![Claude Code 2.1.286+](https://img.shields.io/badge/Claude_Code-2.1.286%2B-d97757)](#install)
 
-![oneliner in Claude Code: green, yellow, red, the next list and graded ideas](.github/assets/one-liner.gif)
+![OneLiner in Claude Code: green, yellow, red, the next list and graded ideas](.github/assets/one-liner.gif)
 
 ![All good: everything green](.github/assets/strip_green.png)
 ![Getting tight: uncommitted work, limit filling before reset, cache cooling](.github/assets/strip_yellow.png)
@@ -34,7 +34,7 @@ Working with Claude Code all day, the same things keep costing time:
 - **You lose track of git**: what's committed, what's pushed, whether a teammate (or another agent) pushed in the meantime.
 - **Context fills up**, compaction happens, and you have to explain where you left off again.
 
-`oneliner` puts all of it in one line: green while everything is fine, yellow when it's getting tight, red when something needs you now.
+**OneLiner** puts all of it in one line: green while everything is fine, yellow when it's getting tight, red when something needs you now.
 
 ## The strip
 
@@ -107,7 +107,7 @@ Requires **Claude Code 2.1.286 or newer** (mods / function hooks).
 
 Or from a terminal: `claude plugin marketplace add deadraw/claude-code-oneliner`, then `claude plugin install oneliner@claude-code-oneliner`. Restart Claude Code and the strip appears after your first message.
 
-**Updates.** The first time oneliner starts after a marketplace install, it asks once: *Keep oneliner up to date automatically?* Pick **Yes** and new versions install when Claude Code starts. Your answer is saved as `"autoUpdate"` on the marketplace entry in `~/.claude/settings.json` (Claude Code leaves auto-update off by default for marketplaces outside Anthropic's own).
+**Updates.** The first time OneLiner starts after a marketplace install, it asks once: *Keep OneLiner up to date automatically?* Pick **Yes** and new versions install when Claude Code starts. Your answer is saved as `"autoUpdate"` on the marketplace entry in `~/.claude/settings.json` (Claude Code leaves auto-update off by default for marketplaces outside Anthropic's own).
 
 To change it later:
 

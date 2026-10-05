@@ -1,6 +1,7 @@
 {
   "name": "oneliner",
-  "version": "1.0.2",
+  "displayName": "OneLiner",
+  "version": "1.0.3",
   "description": "A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas, in one line above your prompt.",
   "author": { "name": "deadraw", "url": "https://github.com/deadraw" },
   "homepage": "https://github.com/deadraw/claude-code-oneliner",
