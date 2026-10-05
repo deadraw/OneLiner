@@ -1,8 +1,8 @@
 {
-  "name": "claude-code-oneliner",
+  "name": "deadraw",
   "owner": { "name": "deadraw", "url": "https://github.com/deadraw" },
   "metadata": {
-    "description": "oneliner: limits, prompt cache, context and git in one line above the Claude Code prompt."
+    "description": "OneLiner: limits, prompt cache, context and git in one line above the Claude Code prompt."
   },
   "plugins": [
     {
@@ -12,8 +12,8 @@
       "description": "A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas, in one line above your prompt.",
       "version": "1.0.3",
       "author": { "name": "deadraw", "url": "https://github.com/deadraw" },
-      "homepage": "https://github.com/deadraw/claude-code-oneliner",
-      "repository": "https://github.com/deadraw/claude-code-oneliner",
+      "homepage": "https://github.com/deadraw/OneLiner",
+      "repository": "https://github.com/deadraw/OneLiner",
       "license": "MIT",
       "keywords": ["claude-code", "statusline", "prompt-caching", "rate-limit", "git", "developer-tools"],
       "category": "productivity"

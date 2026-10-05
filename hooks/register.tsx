@@ -891,8 +891,8 @@ async function suggestWithModel($: $, cwd: string) {
 
 // ── auto-update (marketplace installs) ──────────────────────────
 
-const MARKETPLACE = 'claude-code-oneliner'
-const MARKETPLACE_URL = 'https://github.com/deadraw/claude-code-oneliner.git'
+const MARKETPLACE = 'deadraw'
+const MARKETPLACE_URL = 'https://github.com/deadraw/OneLiner.git'
 const AUTO_UPDATE_ASKED_KEY = 'autoUpdate:asked' // one $.store value: asked once per machine
 
 type MarketplaceEntry = { source?: unknown; autoUpdate?: boolean }

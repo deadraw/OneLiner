@@ -1,8 +1,8 @@
-# claude-code-oneliner
+# OneLiner
 
 **A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas - in one line above your prompt.**
 
-[![Latest release](https://img.shields.io/github/v/release/deadraw/claude-code-oneliner?label=release&color=6a6ae4)](https://github.com/deadraw/claude-code-oneliner/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/deadraw/OneLiner?label=release&color=6a6ae4)](https://github.com/deadraw/OneLiner/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-e34a9e)](LICENSE)
 [![Claude Code 2.1.286+](https://img.shields.io/badge/Claude_Code-2.1.286%2B-d97757)](#install)
 
@@ -17,8 +17,8 @@
 In Claude Code:
 
 ```
-/plugin marketplace add deadraw/claude-code-oneliner
-/plugin install oneliner@claude-code-oneliner
+/plugin marketplace add deadraw/OneLiner
+/plugin install oneliner@deadraw
 ```
 
 Restart Claude Code. To get new versions automatically, turn on auto-update ([how](#from-the-marketplace-recommended)). [Full install notes ↓](#install)
@@ -101,23 +101,23 @@ Requires **Claude Code 2.1.286 or newer** (mods / function hooks).
 ### From the marketplace (recommended)
 
 ```
-/plugin marketplace add deadraw/claude-code-oneliner
-/plugin install oneliner@claude-code-oneliner
+/plugin marketplace add deadraw/OneLiner
+/plugin install oneliner@deadraw
 ```
 
-Or from a terminal: `claude plugin marketplace add deadraw/claude-code-oneliner`, then `claude plugin install oneliner@claude-code-oneliner`. Restart Claude Code and the strip appears after your first message.
+Or from a terminal: `claude plugin marketplace add deadraw/OneLiner`, then `claude plugin install oneliner@deadraw`. Restart Claude Code and the strip appears after your first message.
 
 **Updates.** The first time OneLiner starts after a marketplace install, it asks once: *Keep OneLiner up to date automatically?* Pick **Yes** and new versions install when Claude Code starts. Your answer is saved as `"autoUpdate"` on the marketplace entry in `~/.claude/settings.json` (Claude Code leaves auto-update off by default for marketplaces outside Anthropic's own).
 
 To change it later:
 
-- **Terminal:** `/plugin` → Marketplaces → **claude-code-oneliner** → Enable / Disable auto-update.
+- **Terminal:** `/plugin` → Marketplaces → **deadraw** → Enable / Disable auto-update.
 - **Desktop app** (or by hand): in `~/.claude/settings.json`, set `"autoUpdate"` to `true` or `false`:
 
 ```json
 "extraKnownMarketplaces": {
-  "claude-code-oneliner": {
-    "source": { "source": "git", "url": "https://github.com/deadraw/claude-code-oneliner.git" },
+  "deadraw": {
+    "source": { "source": "git", "url": "https://github.com/deadraw/OneLiner.git" },
     "autoUpdate": false
   }
 }
@@ -126,13 +126,13 @@ To change it later:
 With auto-update off, update by hand (the desktop app's Plugins page has an **Update** button too):
 
 ```
-/plugin marketplace update claude-code-oneliner
+/plugin marketplace update deadraw
 ```
 
 ### Manual (git clone)
 
 ```bash
-git clone https://github.com/deadraw/claude-code-oneliner ~/.claude/mods/claude-code-oneliner
+git clone https://github.com/deadraw/OneLiner ~/.claude/mods/OneLiner
 ```
 
 Then load it in every session by adding this to `~/.claude/settings.json`:
@@ -140,7 +140,7 @@ Then load it in every session by adding this to `~/.claude/settings.json`:
 ```json
 {
   "env": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/claude-code-oneliner"
+    "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/OneLiner"
   }
 }
 ```
@@ -150,7 +150,7 @@ If you already load other plugin folders, separate the paths with `;` on Windows
 To try it for one session only:
 
 ```bash
-claude --plugin-dir ~/.claude/mods/claude-code-oneliner
+claude --plugin-dir ~/.claude/mods/OneLiner
 ```
 
 ## How accurate is it?
