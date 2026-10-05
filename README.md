@@ -14,11 +14,14 @@
 
 ### Quick install
 
-```bash
-git clone https://github.com/deadraw/claude-code-oneliner ~/.claude/mods/claude-code-oneliner
+In Claude Code:
+
+```
+/plugin marketplace add deadraw/claude-code-oneliner
+/plugin install oneliner@claude-code-oneliner
 ```
 
-Then add `"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/claude-code-oneliner"` to the `env` block of `~/.claude/settings.json` and restart Claude Code. [Full install notes ↓](#install)
+Restart Claude Code. To get new versions automatically: `/plugin` → Marketplaces → **claude-code-oneliner** → Enable auto-update. [Full install notes ↓](#install)
 
 ---
 
@@ -95,6 +98,23 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 
 Requires **Claude Code 2.1.286 or newer** (mods / function hooks).
 
+### From the marketplace (recommended)
+
+```
+/plugin marketplace add deadraw/claude-code-oneliner
+/plugin install oneliner@claude-code-oneliner
+```
+
+Or from a terminal: `claude plugin marketplace add deadraw/claude-code-oneliner`, then `claude plugin install oneliner@claude-code-oneliner`. Restart Claude Code and the strip appears after your first message.
+
+**Updates.** Auto-update is off by default for marketplaces outside Anthropic's own. Turn it on once in `/plugin` → Marketplaces → **claude-code-oneliner** → Enable auto-update, and new versions arrive when Claude Code starts. Or update by hand:
+
+```
+/plugin marketplace update claude-code-oneliner
+```
+
+### Manual (git clone)
+
 ```bash
 git clone https://github.com/deadraw/claude-code-oneliner ~/.claude/mods/claude-code-oneliner
 ```
@@ -109,7 +129,7 @@ Then load it in every session by adding this to `~/.claude/settings.json`:
 }
 ```
 
-If you already load other plugin folders, separate the paths with `;` on Windows and `:` on macOS/Linux. Restart Claude Code (desktop app or terminal) and the strip appears after your first message.
+If you already load other plugin folders, separate the paths with `;` on Windows and `:` on macOS/Linux. Restart Claude Code (desktop app or terminal). Update later with `git pull` in that folder. Use one install method, not both.
 
 To try it for one session only:
 
