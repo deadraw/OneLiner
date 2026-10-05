@@ -724,7 +724,8 @@ const GRADE_COLORS: Record<number, string> = { 3: '#F7D35C', 2: '#C4D3E6', 1: '#
 const GRADE_STYLE = 'text' as 'text' | 'dot'
 // Screen 2 title gradient, left → right.
 const IDEAS_FROM = '#6a6ae4'
-const IDEAS_TO = '#e34a9e'
+const CREDIT_COLOR = '#4a4a4a' // "v1.0.1 © deadraw" in the next list: darker than dim text, there if you look
+const IDEAS_TO ='#e34a9e'
 
 /** The color `t` (0–1) of the way from one #rrggbb to another. */
 function mixHex(from: string, to: string, t: number): string {
@@ -962,9 +963,11 @@ export const register: Register = on => {
   let lastRequestAt: number | null = null
   let lastEffort: string | null = null // the effort the last main request used
   let demoTimer: { cancel: () => void } | null = null // /strip demo play
+  let version = '' // from plugin.json, for the credit line
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
+    try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch {}
     await $.command.register({ name: 'ship', description: 'Commit (and optionally push) the working tree' })
     await $.command.register({ name: 'brief', description: 'Show where you left off in this project' })
     await $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' })
@@ -1524,7 +1527,7 @@ export const register: Register = on => {
       )
     }
     const note = (text: string) => <Box marginLeft={4}><Text dimColor italic>{text}</Text></Box>
-    const credit = <Text dimColor>{'© deadraw '}</Text>
+    const credit = <Text color={CREDIT_COLOR}>{`${version ? `v${version} ` : ''}© deadraw `}</Text>
 
     // /strip panel: one row per part, ● on / ○ off, saved for every project.
     if (isMenuOpen) {
