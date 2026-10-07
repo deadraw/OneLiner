@@ -2,7 +2,7 @@
 
 # OneLiner
 
-**A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, one-click git ship, and next-step ideas - in one line above your prompt.**
+**A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, git changes and ship, and next-step ideas - in one line above your prompt.**
 
 [![Latest release](https://img.shields.io/github/v/release/deadraw/OneLiner?label=release&color=6a6ae4)](https://github.com/deadraw/OneLiner/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-e34a9e)](LICENSE)
@@ -44,7 +44,7 @@ Working with Claude Code all day, the same things keep costing time:
 
 | Segment | Shows | 🟢 | 🟡 | 🔴 |
 |---|---|---|---|---|
-| **git** | branch, changed files (Δ), unpushed (↑), behind (↓) | clean and pushed | changes not shipped / behind (+ **Ship** button) | merge conflict, rebase stopped halfway, diverged |
+| **git** | branch, changed files (Δ), unpushed (↑), behind (↓) | clean and pushed | changes not shipped / behind (**▴** opens the changes panel with **Ship**) | merge conflict, rebase stopped halfway, diverged |
 | **dev** | your local dev server | running | - | build error (gray when off, + **Start**) |
 | **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **Handoff** button) |
 | **ctx** | context window fill and tokens | ≤ 49% | 50–70% | ≥ 71% (+ **Handoff** and **Compact** buttons) |
@@ -64,7 +64,7 @@ In the desktop app, point at any part of the strip to see more, written into the
 
 | Part | Hover shows |
 |---|---|
-| **git** | the first changed files, what's waiting to push or pull, the last commit |
+| **git** | one changed file with its lines (`register.tsx +12 −3`), or how many and their lines (`4 edits +43 −18`); the last commit's files and age (`last: handoff.md, problem.c · 7m ago`) |
 | **dev** | the server address, or the full build error |
 | **5h limit** | reset time, fill forecast, weekly window, and what this session has cost (`$2.43`) |
 | **ctx** | free space and window size, with **📝** (handoff) and **♻️** (compact) at any fill level |
@@ -72,11 +72,19 @@ In the desktop app, point at any part of the strip to see more, written into the
 
 Token counts read the way you'd say them: `482k`, `1M`, `1.2M`.
 
+### Changes
+
+**▴** after the branch opens the changes panel, in the same place as `next`:
+
+- every changed file with its lines added and removed (`new` or `binary` when there are none to count); pick one (or press 1-9) to see its diff in a pane, with **‹ Previous** / **Next ›** through the rest
+- the commits waiting to push
+- **Ship**, **+68 −31** (the whole diff, file by file) and, on a branch other than `main`, **Create PR**: asked in a row under the strip as **Create** or **Draft**, it pushes the branch if needed and opens the pull request with the GitHub CLI (`gh`), its title and description written from the commits. Without `gh`, the request is put in the prompt for Claude.
+
 On a narrow window the strip first drops the optional extras (switch hint, `% read`, `7d`), then switches to short labels (`main 4Δ 2↑`, `5h 78% →03:03`, `⏱22m`), and only then drops whole parts: **dev**, **git**, **ctx**. **Limit** and **cache** always stay.
 
 ## The next list
 
-Click **`next ▾`** to open a short list above the prompt:
+Click **`next ▴`** to open a short list above the prompt:
 
 <p>
   <img src=".github/assets/strip_next.png" alt="The next list: options from Claude's last answer" width="49%">
@@ -204,7 +212,9 @@ Almost nothing. Everything on the strip is read from data Claude Code already ha
 | `/brief` | free after a compaction (it reads the fresh handoff note); otherwise one short Claude Sonnet call, reused until you send something new |
 | `✦ 3 more ideas` | one small question; cheap from a warm cache, a few thousand Claude Sonnet tokens otherwise |
 | `/handoff` | one question over the cached conversation, plus writing the file |
-| `/ship` commit message | one short Claude Haiku call |
+| `/ship` commit message | one short Claude Sonnet call |
+| **Create PR** title and description | one short Claude Sonnet call |
+| Changes panel and diff pane | free |
 | Handoff note before compaction (`.claude/handoff.md`) | one question over the cached conversation, once per compaction (Claude Sonnet when there is nothing cached yet) |
 
 ## Privacy
@@ -230,8 +240,7 @@ Everything tunable is a named setting at the top of [`hooks/register.tsx`](hooks
 | `GRADE_STYLE` | `'text'` (colored text) or `'dot'` (colored ●) |
 | `IDEAS_FROM`, `IDEAS_TO` | the `next` gradient, `#6a6ae4` → `#e34a9e` |
 | `SHIP_BUILD` | `true`: build before committing |
-| `SMART_MODEL` | `claude-sonnet-5-5` (effort low): the brief, the handoff note, ideas off the cache |
-| `COMMIT_MODEL` | `claude-haiku-4-5`: commit messages |
+| `SMART_MODEL` | `claude-sonnet-5-5` (effort low): the brief, the handoff note, commit messages, pull request texts, ideas off the cache |
 | `IDEAS_SMART_LIMIT_PCT`, `IDEAS_SMART_CACHE_SHARE` | 80, 0.1: when ideas switch from the cached conversation to `SMART_MODEL` |
 | `BRIEF_GAP_HOURS` | 6 |
 

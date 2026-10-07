@@ -9,11 +9,24 @@ export type GitState = {
   conflicts: number
   /** An unfinished merge / rebase / cherry-pick / revert, else null. */
   operation: string | null
-  /** The first changed files' names, for the hover. */
-  files?: string[]
-  /** The last commit: subject · relative time. */
-  lastCommit?: string | null
+  /** Every changed file with its line counts against HEAD; files git doesn't track yet come last, as new. */
+  stats?: FileStat[]
+  /** Lines added and removed over all changed files. */
+  added?: number
+  removed?: number
+  /** The last commit's file names (the first three), how many more, and when (seconds since the epoch). */
+  lastFiles?: string[]
+  lastFilesMore?: number
+  lastAt?: number
+  /** Subjects of the commits not pushed yet, newest first (at most 5). */
+  toPush?: string[]
 }
+
+/** One changed file: lines added and removed against HEAD, or a new or binary file. */
+export type FileStat = { path: string; added: number; removed: number; kind: 'edit' | 'new' | 'binary' }
+
+/** The diff pane: the changed files it steps through, the one shown, its hunks and a note (cut, binary). */
+export type DiffView = { paths: string[]; index: number; text: string; note: string | null }
 
 export type DevState = {
   port: number | null
@@ -118,6 +131,10 @@ declare module 'claude-code' {
       handoffStep: HandoffStep | null
       /** A question shown in a row under the strip (Ship, resend), until answered. */
       rowAsk: { text: string; options: string[] } | null
+      /** The changes panel under the strip (a click on git's ▾). */
+      isChangesOpen: boolean
+      /** The file the diff pane shows, or null. */
+      diffView: DiffView | null
       /** /strip demo: sample values for screenshots (green, yellow, red, next, ideas), or null. */
       demo: string | null
       now: number

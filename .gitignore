@@ -3,4 +3,5 @@ node_modules/
 Thumbs.db
 *.log
 dev/
+ideas/
 .github/assets/OneLiner-cover*

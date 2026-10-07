@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Brief, HandoffStep, CacheState, ContextState, DevState, GitState, LimitState, NextState } from '../types'
+import type { Brief, HandoffStep, CacheState, ContextState, DevState, DiffView, FileStat, GitState, LimitState, NextState } from '../types'
 
 const CACHE_TTL_MIN = 60 // subscription default
 const CACHE_TTL_OVERAGE_MIN = 5 // extra usage / reported 5m
@@ -28,8 +28,8 @@ const FAST_TICK_MS = 15_000 // only while the 5m cache applies
 const TICK_MS = 60_000 // cache + limit countdowns, limit %, dev probe; git every 2nd tick
 const BRIEF_PANE = 'oneliner-brief'
 const LIMITS_PANE = 'oneliner-limits'
-const COMMIT_MODEL = 'claude-haiku-4-5-20251001' // commit messages: a short, fast job
-const SMART_MODEL = 'claude-sonnet-5-5' // the brief, the handoff note, ideas off the cache (effort low)
+const DIFF_PANE = 'oneliner-diff'
+const SMART_MODEL = 'claude-sonnet-5-5' // the brief, the handoff note, commit and PR texts, ideas off the cache (effort low)
 // "✦ 3 more ideas" leaves the cached conversation for SMART_MODEL when the 5h limit is this full,
 // or the cache has less than this share of its lifetime left (or is cold).
 const IDEAS_SMART_LIMIT_PCT = 80
@@ -60,6 +60,8 @@ const handoffStep = atom({ plugin: 'oneliner', key: 'handoffStep' } as const, nu
 const demo = atom({ plugin: 'oneliner', key: 'demo' } as const, null as string | null)
 const hidden = atom({ plugin: 'oneliner', key: 'hidden' } as const, [] as string[])
 const stripMenu = atom({ plugin: 'oneliner', key: 'isStripMenuOpen' } as const, false)
+const isChangesOpen = atom({ plugin: 'oneliner', key: 'isChangesOpen' } as const, false)
+const diffView = atom({ plugin: 'oneliner', key: 'diffView' } as const, null as DiffView | null)
 const now = atom({ plugin: 'oneliner', key: 'now' } as const, 0)
 const brief = atom({ plugin: 'oneliner', key: 'brief' } as const, null)
 const isShipping = atom({ plugin: 'oneliner', key: 'isShipping' } as const, false)
@@ -282,9 +284,16 @@ async function gitOperation($: $): Promise<string | null> {
 async function refreshGit($: $): Promise<GitState> {
   const next: GitState = { isRepo: false, branch: '', changed: 0, ahead: 0, behind: 0, hasUpstream: false, conflicts: 0, operation: null }
   try {
-    const r = await runGit($, ['status', '--porcelain=v2', '--branch'])
+    // The three git calls run side by side: each one costs a process start (slow on Windows).
+    const [r, op, log, numstat] = await Promise.all([
+      runGit($, ['status', '--porcelain=v2', '--branch']),
+      gitOperation($).catch(() => null),
+      runGit($, ['log', '-1', '--format=%ct', '--name-only']).catch(() => null), // the age is drawn from the time, kept current
+      runGit($, ['diff', '--numstat', 'HEAD']).catch(() => null),
+    ])
     if (r.exitCode === 0) {
       next.isRepo = true
+      const untracked: string[] = []
       for (const line of r.stdout.split('\n')) {
         if (line.startsWith('# branch.head ')) next.branch = line.slice(14).trim()
         else if (line.startsWith('# branch.upstream ')) next.hasUpstream = true
@@ -294,21 +303,50 @@ async function refreshGit($: $): Promise<GitState> {
         } else if (line.trim() && !line.startsWith('#')) {
           next.changed += 1
           if (line.startsWith('u ')) next.conflicts += 1
-          // Porcelain v2: the path is the last field (a rename adds "\t<old path>").
-          const fieldsBefore = line.startsWith('1 ') ? 8 : line.startsWith('2 ') ? 9 : line.startsWith('u ') ? 10 : 1
-          const path = (line.split(' ').slice(fieldsBefore).join(' ').split('\t')[0] ?? '').trim()
-          if (path && (next.files ??= []).length < 3) next.files.push(path.split('/').pop() ?? path)
+          if (line.startsWith('? ')) untracked.push(line.slice(2).trim())
         }
       }
-      next.operation = await gitOperation($)
-      try {
-        const log = await runGit($, ['log', '-1', '--format=%s · %ct']) // the age is drawn from the time, kept current
-        if (log.exitCode === 0 && log.stdout.trim()) next.lastCommit = log.stdout.trim()
-      } catch {}
+      next.operation = op
+      // Line counts per file against HEAD (numstat: "added<TAB>removed<TAB>path", "-" for binary).
+      const stats: FileStat[] = []
+      for (const line of numstat && numstat.exitCode === 0 ? numstat.stdout.split('\n') : []) {
+        const [a, d, ...rest] = line.split('\t')
+        const path = rest.join('\t').trim()
+        if (!path) continue
+        const isBinary = a === '-'
+        stats.push({ path, added: isBinary ? 0 : Number(a) || 0, removed: isBinary ? 0 : Number(d) || 0, kind: isBinary ? 'binary' : 'edit' })
+      }
+      for (const path of untracked) stats.push({ path, added: 0, removed: 0, kind: 'new' })
+      next.stats = stats.slice(0, 50)
+      next.added = stats.reduce((n, s) => n + s.added, 0)
+      next.removed = stats.reduce((n, s) => n + s.removed, 0)
+      if (log && log.exitCode === 0) {
+        const [secs, ...names] = log.stdout.split('\n').map(l => l.trim()).filter(Boolean)
+        if (secs) {
+          next.lastAt = Number(secs)
+          next.lastFiles = names.slice(0, 3).map(baseName)
+          next.lastFilesMore = Math.max(0, names.length - 3)
+        }
+      }
+      if (next.ahead > 0) {
+        const p = await runGit($, ['log', '@{u}..HEAD', '--format=%s', '-n', '5']).catch(() => null)
+        if (p && p.exitCode === 0) next.toPush = p.stdout.split('\n').map(l => l.trim()).filter(Boolean)
+      }
     }
   } catch {}
   await update($, git, () => next)
   return next
+}
+
+/** A path's last part: "hooks/register.tsx" → "register.tsx" (a folder keeps its name). */
+function baseName(path: string): string {
+  return path.replace(/\/$/, '').split('/').pop() ?? path
+}
+
+/** "register.tsx +12 −3", "logo.png new", "font.woff binary". */
+function fileLine(s: FileStat): string {
+  const name = baseName(s.path)
+  return s.kind === 'new' ? `${name} new` : s.kind === 'binary' ? `${name} binary` : `${name} +${s.added} −${s.removed}`
 }
 
 async function commitMessage($: $): Promise<string> {
@@ -316,8 +354,9 @@ async function commitMessage($: $): Promise<string> {
   const diff = await runGit($, ['diff', 'HEAD', '--no-color'])
   const fallback = `Update ${stat.stdout.trim().split('\n').length} files`
   const r = await $.model.complete({
-    model: COMMIT_MODEL,
-    maxTokens: 120,
+    model: SMART_MODEL,
+    effort: 'low',
+    maxTokens: 200,
     timeoutMs: 20_000,
     system: 'You write git commit messages. Reply with the message only: one imperative subject line under 72 chars, optionally a blank line and up to 3 short bullet lines.',
     prompt: `Files:\n${stat.stdout.slice(0, 3000)}\n\nDiff (truncated):\n${diff.stdout.slice(0, 8000)}`,
@@ -417,6 +456,154 @@ async function buildCheck($: $): Promise<string | null> {
   }
 }
 
+// ── changes: the diff pane and pull requests ────────────────────
+
+const DIFF_MAX_CHARS = 10_000 // what one Code element draws
+const DEFAULT_BRANCHES = new Set(['main', 'master'])
+
+/** Shows one changed file's diff against HEAD in the diff pane: its hunks only, cut at a hunk to fit. */
+async function openDiff($: $, paths: string[], index: number) {
+  const path = paths[index]
+  if (!path) return
+  const g = await read($, git)
+  const isNew = g.stats?.find(s => s.path === path)?.kind === 'new'
+  let text = ''
+  let note: string | null = null
+  try {
+    // Status and numstat paths are the repository's, so the diff is asked by the full path.
+    const top = (await runGit($, ['rev-parse', '--show-toplevel'])).stdout.trim()
+    const r = await runGit($, isNew
+      ? ['diff', '--no-color', '--no-index', '--', '/dev/null', `${top}/${path}`]
+      : ['diff', '--no-color', 'HEAD', '--', `${top}/${path}`])
+    const lines = r.stdout.split('\n')
+    const first = lines.findIndex(l => l.startsWith('@@'))
+    text = first === -1 ? '' : lines.slice(first).join('\n').replace(/\n+$/, '')
+  } catch {}
+  if (text.length > DIFF_MAX_CHARS) {
+    // Cut between hunks: a hunk cut in the middle no longer draws as a diff.
+    const cut = text.lastIndexOf('\n@@', DIFF_MAX_CHARS)
+    text = text.slice(0, cut > 0 ? cut : text.lastIndexOf('\n', DIFF_MAX_CHARS))
+    note = 'The rest of this diff is longer than the pane draws.'
+  }
+  if (!text) note = 'No text changes to show (a binary file, or a folder).'
+  await update($, diffView, () => ({ paths, index, text, note }))
+  await $.ui.open({ id: DIFF_PANE, title: baseName(path), closeOnEscape: true })
+}
+
+/** A pull request for this branch: Create or Draft asked in the strip row, the title and description from Sonnet. */
+async function createPr($: $) {
+  const g = await refreshGit($)
+  if (!g.isRepo || DEFAULT_BRANCHES.has(g.branch)) return $.ui.toast(`A pull request starts from a branch other than ${g.branch || 'main'}`)
+  const head = await runGit($, ['rev-parse', '--abbrev-ref', 'origin/HEAD']).catch(() => null)
+  const base = head && head.exitCode === 0 && head.stdout.trim() ? head.stdout.trim().replace(/^origin\//, '') : 'main'
+  const hasGh = await $.process.run(['gh', '--version'], { timeoutMs: 10_000 }).then(r => r.exitCode === 0, () => false)
+  if (!hasGh) {
+    // Without the GitHub CLI, Claude takes it from the prompt (filled, never sent).
+    await $.prompt.fill({ text: `Create a pull request from ${g.branch} into ${base}, with a title and description from its commits.`, mode: 'replace' })
+    return $.ui.toast('GitHub CLI (gh) not found: the request is in the prompt for Claude')
+  }
+  const open = await $.process.run(['gh', 'pr', 'view', '--json', 'url', '-q', '.url'], { timeoutMs: 20_000 }).catch(() => null)
+  if (open && open.exitCode === 0 && open.stdout.trim()) return $.ui.toast(`A pull request is already open: ${open.stdout.trim()}`, { timeoutMs: 10_000 })
+
+  const pushFirst = g.ahead > 0 || !g.hasUpstream
+  const choice = await askInRow($, `Pull request ${g.branch} → ${base}${pushFirst ? ' (pushes the branch first)' : ''}?`, ['Create', 'Draft'])
+  if (!choice) return
+  await update($, isShipping, () => true)
+  try {
+    if (pushFirst) {
+      const p = await runGit($, g.hasUpstream ? ['push'] : ['push', '-u', 'origin', g.branch], 120_000)
+      if (p.exitCode !== 0) return $.ui.toast(`Push failed: ${p.stderr.trim().split('\n').pop()}`)
+    }
+    $.ui.toast('Writing the pull request…')
+    const { title, body } = await prText($, base)
+    const r = await $.process.run(
+      ['gh', 'pr', 'create', '--base', base, '--title', title, '--body', body, ...(choice === 'Draft' ? ['--draft'] : [])],
+      { timeoutMs: 60_000 },
+    )
+    const url = r.stdout.trim().split('\n').pop() ?? ''
+    $.ui.toast(r.exitCode === 0
+      ? `${choice === 'Draft' ? 'Draft pull request' : 'Pull request'} opened: ${url}`
+      : `Pull request failed: ${(r.stderr || r.stdout).trim().split('\n').pop()}`, { timeoutMs: 10_000 })
+  } finally {
+    await update($, isShipping, () => false)
+    await refreshGit($)
+  }
+}
+
+/** The pull request's title and description, written by Sonnet from the branch's commits and files. */
+async function prText($: $, base: string): Promise<{ title: string; body: string }> {
+  const [log, stat] = await Promise.all([
+    runGit($, ['log', `origin/${base}..HEAD`, '--format=- %s%n%b']),
+    runGit($, ['diff', '--stat', `origin/${base}...HEAD`]),
+  ])
+  const subjects = log.stdout.split('\n').filter(l => l.startsWith('- '))
+  const fallback = { title: (subjects[0] ?? '- Update').slice(2), body: subjects.join('\n') }
+  const r = await $.model.complete({
+    model: SMART_MODEL,
+    effort: 'low',
+    maxTokens: 800,
+    timeoutMs: 30_000,
+    system: 'You write GitHub pull request texts. Reply with the title on the first line (imperative, under 70 characters), a blank line, then the description in Markdown: a short summary paragraph and a "Changes" list. No sign-off, and no mention of AI or of who wrote it.',
+    prompt: `Commits:\n${log.stdout.slice(0, 6000)}\n\nFiles changed:\n${stat.stdout.slice(0, 3000)}`,
+  })
+  if (!r.isAnswered || !r.text.trim()) return fallback
+  const [title = '', ...rest] = r.text.trim().split('\n')
+  return { title: title.replace(/^#+\s*/, '').trim() || fallback.title, body: rest.join('\n').trim() || fallback.body }
+}
+
+// ── loading the strip, and reloading it while developing ────────
+
+let version = '' // from plugin.json, for the credit line
+
+/** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
+function loadReadings($: $, cwd: string, at: number) {
+  void refreshLimit($).then(() => seedCache($, cwd, at))
+  void refreshGit($).then(() => fetchRemote($)).then(() => refreshGit($))
+  // A dev server that isn't running takes Windows ~2-4 s to refuse, so its probe never holds the rest.
+  void (async () => {
+    const found = await detectDev($, cwd)
+    await update($, dev, (): DevState => ({ port: found?.port ?? null, status: found ? 'down' : 'none', error: null }))
+    await probeDev($)
+  })()
+  void (async () => {
+    try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch {}
+  })()
+  void autoUpdateSettingsPath($).then(path => update($, autoUpdateOffer, () => path !== null))
+}
+
+/**
+ * /strip reload: every panel and question closed, every reading taken again, as at a session's start.
+ * (Edited code loads by itself with CLAUDE_CODE_PLUGIN_DIR_WATCH=1: each save reloads this plugin alone.)
+ * Fresh also forgets the auto-update answer and this project's saved data, so first-run behavior shows again.
+ */
+async function reloadStrip($: $, cwd: string, isFresh: boolean) {
+  await answerRow($, null)
+  await Promise.all([
+    update($, nextSteps, (s): NextState => ({ ...s, isOpen: false, view: 'main' })),
+    update($, stripMenu, () => false),
+    update($, isChangesOpen, () => false),
+    update($, diffView, () => null),
+    update($, handoffStep, () => null),
+    update($, demo, () => null),
+    update($, isShipping, () => false),
+    update($, isWritingHandoff, () => false),
+    update($, remoteSeen, () => null),
+  ])
+  if (isFresh) {
+    await Promise.all([
+      $.store.delete(AUTO_UPDATE_ASKED_KEY),
+      $.store.delete(storeKey(cwd)),
+      $.store.delete(briefCacheKey(cwd)),
+      update($, cache, (c): CacheState => ({ ...c, lastTurnAt: null, resetReason: null })),
+      update($, brief, () => null),
+    ])
+  }
+  const at = await $.clock.now()
+  await update($, now, () => at)
+  loadReadings($, cwd, at)
+  $.ui.toast(isFresh ? 'OneLiner reloaded fresh: saved answers and project data forgotten' : 'OneLiner reloaded')
+}
+
 // ── dev server ──────────────────────────────────────────────────
 
 type LaunchConfig = { runtimeExecutable?: string; runtimeArgs?: string[]; port?: number }
@@ -497,7 +684,18 @@ async function refreshLimit($: $) {
     const ctx = usage.context
     await update($, context, () => ({ percent: ctx.percent ?? null, tokens: ctx.tokens ?? null, window: ctx.window, usd: usage.cost?.usd ?? null }))
     const five = usage.rateLimits.find(r => r.kind === 'five_hour') ?? usage.rateLimits[0]
-    if (!five) return
+    if (!five) {
+      // No limits until this session's first request (an old session just opened, or right after a reload):
+      // the last reading saved by any session, while its window lasts. Past its reset the strip shows 0%.
+      const [last, cur, at] = await Promise.all([$.store.get(LAST_LIMIT_KEY) as Promise<LastLimit | undefined>, read($, limit), $.clock.now()])
+      const isCurrent = last && (last.resetsAt ? true : at - last.at < 5 * 3_600_000)
+      if (last && isCurrent && cur.percent === null) {
+        await update($, limit, l => ({
+          ...l, percent: last.percent, resetsAt: last.resetsAt, weekPercent: last.weekPercent, weekResetsAt: last.weekResetsAt, samples: [],
+        }))
+      }
+      return
+    }
     const isOverage = usage.rateLimits.some(r => (r.kind === 'five_hour' || r.kind === 'seven_day') && r.percentUsed >= 100)
     const week = usage.rateLimits.find(r => r.kind === 'seven_day')
     const at = await $.clock.now()
@@ -512,6 +710,8 @@ async function refreshLimit($: $) {
       }
     })
     await recordHistory($, five.resetsAt ?? null, five.percentUsed, at)
+    const last: LastLimit = { percent: five.percentUsed, resetsAt: five.resetsAt ?? null, weekPercent: week?.percentUsed ?? null, weekResetsAt: week?.resetsAt ?? null, at }
+    void $.store.set(LAST_LIMIT_KEY, last)
     const fullAt = limitFullAt(cur)
     if (fullAt !== null && fullAt - at < FORECAST_WARN_MS && cur.forecastWarnedFor !== (cur.resetsAt ?? 'now')) {
       await update($, limit, l => ({ ...l, forecastWarnedFor: l.resetsAt ?? 'now' }))
@@ -598,6 +798,9 @@ async function offerResend($: $, errorText: string, prompt: string) {
 // ── limit history (for /limits) ─────────────────────────────────
 
 const HISTORY_KEY = 'limit:history' // one per account: every session adds to the same window
+// The last 5h / 7d reading, one per account: a session shows it before its own first request reports one.
+const LAST_LIMIT_KEY = 'limit:last'
+type LastLimit = { percent: number; resetsAt: string | null; weekPercent: number | null; weekResetsAt: string | null; at: number }
 const WINDOW_MS = 5 * 60 * 60_000
 type History = { resetsAt: string | null; points: { at: number; pct: number }[] }
 
@@ -1216,36 +1419,36 @@ export const register: Register = on => {
   let lastRequestAt: number | null = null
   let lastEffort: string | null = null // the effort the last main request used
   let demoTimer: { cancel: () => void } | null = null // /strip demo play
-  let version = '' // from plugin.json, for the credit line
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
-    try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch {}
-    void autoUpdateSettingsPath($).then(path => update($, autoUpdateOffer, () => path !== null))
-    await $.command.register({ name: 'ship', description: 'Commit (and optionally push) the working tree' })
-    await $.command.register({ name: 'brief', description: 'Show where you left off in this project' })
-    await $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' })
-    await $.command.register({ name: 'limits', description: 'Show today\'s 5h limit usage and forecast' })
-    await $.command.register({
-      name: 'strip',
-      description: 'Turn strip parts on or off (all projects)',
-      argumentHint: '[git|dev|limit|context|cache|next|all] or demo [green|yellow|red|next|ideas|play|off]',
-    })
-    const saved = await $.store.get(HIDDEN_KEY)
-    await update($, hidden, () => (Array.isArray(saved) ? saved.filter(x => typeof x === 'string') : []))
+    // Only what the session needs before it starts is awaited, all at once; the strip's
+    // readings fill in after, each part as soon as its own check answers.
+    const [, saved, at] = await Promise.all([
+      Promise.all([
+        $.command.register({ name: 'ship', description: 'Commit (and optionally push) the working tree' }),
+        $.command.register({ name: 'brief', description: 'Show where you left off in this project' }),
+        $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' }),
+        $.command.register({ name: 'limits', description: 'Show today\'s 5h limit usage and forecast' }),
+        $.command.register({
+          name: 'strip',
+          description: 'Turn strip parts on or off (all projects)',
+          argumentHint: '[git|dev|limit|context|cache|next|all] or demo [green|yellow|red|next|ideas|play|off] or reload [fresh]',
+        }),
+      ]),
+      $.store.get(HIDDEN_KEY),
+      $.clock.now(),
+    ])
+    await Promise.all([
+      update($, hidden, () => (Array.isArray(saved) ? saved.filter(x => typeof x === 'string') : [])),
+      update($, now, () => at),
+    ])
 
-    const at = await $.clock.now()
-    await update($, now, () => at)
-    const found = await detectDev($, cwd)
-    await update($, dev, (): DevState => ({ port: found?.port ?? null, status: found ? 'down' : 'none', error: null }))
-    await Promise.all([refreshGit($), refreshLimit($), probeDev($)])
-    await seedCache($, cwd, at)
-    void fetchRemote($).then(() => refreshGit($))
-
-    const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
-    if (stored && (at - stored.lastAt) / 3_600_000 >= BRIEF_GAP_HOURS) {
-      void openBrief($, cwd, stored, at)
-    }
+    loadReadings($, cwd, at)
+    void (async () => {
+      const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
+      if (stored && (at - stored.lastAt) / 3_600_000 >= BRIEF_GAP_HOURS) await openBrief($, cwd, stored, at)
+    })()
 
     let ticks = 0
     $.clock.every(TICK_MS, () => {
@@ -1281,6 +1484,7 @@ export const register: Register = on => {
     if ((await $.ui.panes()).some(p => p.id === BRIEF_PANE)) void $.ui.close({ id: BRIEF_PANE })
     if ((await read($, nextSteps)).isOpen) await update($, nextSteps, s => ({ ...s, isOpen: false }))
     if (await read($, stripMenu)) await update($, stripMenu, () => false)
+    if (await read($, isChangesOpen)) await update($, isChangesOpen, () => false)
     return next(e)
   })
 
@@ -1360,7 +1564,7 @@ export const register: Register = on => {
   // Remember that Claude changed project files this turn (notes and docs don't count).
   on('tool.call', async ($, e, next) => {
     const result = await next(e)
-    if (EDIT_TOOLS.has(e.tool) && !result.isError) {
+    if ('tool' in e && EDIT_TOOLS.has(e.tool) && !result.isError) {
       const path = String((e as { file_path?: string; notebook_path?: string }).file_path ?? (e as { notebook_path?: string }).notebook_path ?? '')
       if (!/\.(md|txt)$/i.test(path)) editedThisTurn = true
     }
@@ -1521,6 +1725,10 @@ export const register: Register = on => {
       await update($, demo, () => level)
       return { text: `Demo: ${level}. Sample values only; buttons are off. /strip demo off to exit.` }
     }
+    if (word === 'reload' || word === 'reload fresh') {
+      await reloadStrip($, cwd, word === 'reload fresh')
+      return {}
+    }
     if (word === 'all' || word === 'reset') {
       await setHidden($, [])
       return { text: 'All strip parts are on.' }
@@ -1549,6 +1757,7 @@ export const register: Register = on => {
       read($, nextSteps),
     ])
     const demoLevel = (await read($, demo)) as DemoLevel | null
+    const changesOpen = await read($, isChangesOpen)
     if (demoLevel) ({ g, d, l, c, ctx, n } = demoFixture(demoLevel, at || Date.now(), n))
     // Past its reset the window is empty, even before the next turn reports a new reading.
     if (l.resetsAt && (at || Date.now()) >= Date.parse(l.resetsAt)) l = { ...l, percent: 0, resetsAt: null, samples: [] }
@@ -1564,9 +1773,21 @@ export const register: Register = on => {
       detailMode?: 'push' | 'over' // push the parts to its right aside, or cover them to the strip's end
       buttons?: { label: string; onPress: () => void }[] // more buttons after `button`
       detailButtons?: { label: string; onPress: () => void }[] // actions offered only on hover
+      toggle?: { label: string; onPress: () => void } // a plain ▾ / ▴ right after the text (git's changes panel)
     }
     const segs: Seg[] = []
     const segTextLen = (s: Seg) => s.text.length + (s.extras ?? []).reduce((n, x) => n + x.text.length, 0)
+
+    // The changes panel and next take turns: opening one closes the other.
+    const toggleChanges = () => void (async () => {
+      const isOpening = !(await read($, isChangesOpen))
+      if (isOpening) {
+        await update($, nextSteps, (s): NextState => ({ ...s, isOpen: false }))
+        await update($, stripMenu, () => false)
+        void refreshGit($)
+      }
+      await update($, isChangesOpen, () => isOpening)
+    })()
 
     // git
     if (g.isRepo) {
@@ -1585,16 +1806,20 @@ export const register: Register = on => {
           : dirty ? parts.join(isTight ? ' ' : ' · ') : `${g.branch} ✓`,
         color: isBroken || isDiverged ? 'error' : dirty || g.behind ? 'warning' : g.hasUpstream ? 'success' : undefined,
         dim: !isBroken && !isDiverged && !dirty && !g.behind && !g.hasUpstream,
-        button: dirty && !shipping && !isBroken && !isDiverged ? { label: 'Ship', onPress: () => void ship($) } : undefined,
+        // Ship lives in the changes panel (▴), not on the strip.
         detail: [
-          g.files?.length ? `${g.files.join(', ')}${g.changed > g.files.length ? ` +${g.changed - g.files.length} more` : ''}` : '',
-          g.ahead ? `${g.ahead} to push` : '',
-          g.behind ? `${g.behind} to pull` : '',
+          // One file: its name and line counts. More: how many, and the lines over all of them
+          // (what's to push or pull is already on the strip).
+          g.changed === 1 && g.stats?.[0] ? fileLine(g.stats[0])
+            : g.changed > 1 ? `${g.changed} edits${g.added || g.removed ? ` +${g.added ?? 0} −${g.removed ?? 0}` : ''}` : '',
           !g.hasUpstream ? 'not on a remote yet' : '',
-          // The subject shortened, its age kept: "Hover details, handoff and clear flow… · 5 min ago".
-          g.lastCommit ? `last: ${g.lastCommit.replace(/^(.*) · (\d+)$/, (_, subject: string, secs: string) => `${shortLabel(subject, 40)} · ${shortAge(at - Number(secs) * 1000)} ago`)}` : '',
+          // The last commit's files by name, and how long ago.
+          g.lastFiles?.length
+            ? `last: ${g.lastFiles.join(', ')}${g.lastFilesMore ? ` +${g.lastFilesMore} more` : ''}${g.lastAt ? ` · ${shortAge(at - g.lastAt * 1000)} ago` : ''}`
+            : '',
         ].filter(Boolean).join(' · '),
         detailMode: 'push',
+        toggle: { label: changesOpen ? '▾' : '▴', onPress: toggleChanges },
       })
     }
 
@@ -1712,10 +1937,13 @@ export const register: Register = on => {
     }
 
     // next steps toggle
-    const toggleNext = () => void update($, nextSteps, (s): NextState => ({ ...s, isOpen: !s.isOpen, view: 'main' }))
-    segs.push({
+    const toggleNext = () => {
+      void update($, isChangesOpen, () => false)
+      void update($, nextSteps, (s): NextState => ({ ...s, isOpen: !s.isOpen, view: 'main' }))
+    }
+    if (!changesOpen) segs.push({
       id: 'next', text: '',
-      button: { label: n.isOpen ? 'next ▴' : n.fromAnswer.length ? `next ${n.fromAnswer.length} ▾` : 'next ▾', onPress: toggleNext },
+      button: { label: n.isOpen ? 'next ▾' : n.fromAnswer.length ? `next ${n.fromAnswer.length} ▴` : 'next ▴', onPress: toggleNext },
     })
 
     if (demoLevel) {
@@ -1728,6 +1956,7 @@ export const register: Register = on => {
     // Narrow: first the optional extras (switch hint, then % read, then 7d), then whole parts:
     // dev, git, context, next. Limit + cache always stay.
     const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + 5 : 0)
+      + (s.toggle ? 2 : 0)
       + (s.buttons ?? []).reduce((w, b) => w + b.label.length + 5, 0) + 3
     const total = (list: Seg[]) => list.reduce((n, s) => n + width(s), 0)
     let shown = segs.filter(s => !hiddenParts.includes(s.id))
@@ -1764,7 +1993,8 @@ export const register: Register = on => {
           // No gaps between parts: each part's hover area runs up to the next one, so crossing never drops the details.
           <Box key={s.id} flexDirection="row" gap={1} paddingRight={1}>
             {i > 0 && <Text dimColor>│</Text>}
-            <Box flexDirection="row">
+            {/* Keyed: the hover scope is the text alone, so ▾ and the buttons beside it take a click without the details opening. */}
+            <Box key={`${s.id}-main`} flexDirection="row">
               {s.text !== '' && <Text color={s.color} dimColor={s.dim} wrap="truncate">{s.text}</Text>}
               {(s.extras ?? []).map(x => <Text color={x.color} dimColor={x.dim} wrap="truncate">{x.text}</Text>)}
               {s.detail && (
@@ -1780,7 +2010,15 @@ export const register: Register = on => {
                     </Box>
               )}
             </Box>
-            {s.button && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
+            {/* A button and the panel's arrow sit tight together, no gap. */}
+            {s.button && s.toggle && (
+              <Box flexDirection="row">
+                <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />
+                <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />
+              </Box>
+            )}
+            {s.button && !s.toggle && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
+            {s.toggle && !s.button && <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />}
             {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
           </Box>
         ))}
@@ -1789,7 +2027,7 @@ export const register: Register = on => {
           // A Button can't be colored: "next" carries the gradient, the arrow is a full bracketed button.
           <Box flexDirection="row" gap={1} flexShrink={0} marginLeft={1}>
             {gradient(nextSeg.button.label.replace(/\s*[▾▴]$/, ''), IDEAS_FROM, IDEAS_TO)}
-            <Button key="next-btn" plain label={n.isOpen ? ' ▴  ' : ' ▾  '} onPress={nextSeg.button.onPress} />
+            <Button key="next-btn" plain label={n.isOpen ? ' ▾  ' : ' ▴  '} onPress={nextSeg.button.onPress} />
           </Box>
         )}
       </Box>
@@ -1797,7 +2035,7 @@ export const register: Register = on => {
     // Once after a marketplace install: auto-update, answered right here (never through the model).
     // A question in a row under the strip (Ship, resend): its options, the first one primary, and Cancel.
     const ask = demoLevel ? null : await read($, rowAsk)
-    if (!n.isOpen && !isMenuOpen && ask) {
+    if (!n.isOpen && !isMenuOpen && !changesOpen && ask) {
       return (
         <Box flexDirection="column">
           {strip}
@@ -1813,7 +2051,7 @@ export const register: Register = on => {
     }
     // The handoff, one step at a time in a row under the strip: Write / Cancel, then start over from it or keep going.
     const step = demoLevel ? null : await read($, handoffStep)
-    if (!n.isOpen && !isMenuOpen && step) {
+    if (!n.isOpen && !isMenuOpen && !changesOpen && step) {
       const close = () => void update($, handoffStep, () => null)
       return (
         <Box flexDirection="column">
@@ -1835,7 +2073,7 @@ export const register: Register = on => {
         </Box>
       )
     }
-    if (!n.isOpen && !isMenuOpen && isOfferingUpdate && !demoLevel) {
+    if (!n.isOpen && !isMenuOpen && !changesOpen && isOfferingUpdate && !demoLevel) {
       return (
         <Box flexDirection="column">
           {strip}
@@ -1848,7 +2086,7 @@ export const register: Register = on => {
         </Box>
       )
     }
-    if (!n.isOpen && !isMenuOpen) return strip
+    if (!n.isOpen && !isMenuOpen && !changesOpen) return strip
 
     // The slide-up: picks fill the prompt (never send), 1–4 / s / 0 as hotkeys.
     const pick = (text: string) => {
@@ -1902,6 +2140,57 @@ export const register: Register = on => {
     }
     const note = (text: string) => <Box marginLeft={4}><Text dimColor italic>{text}</Text></Box>
     const credit = <Text color={CREDIT_COLOR}>{`${version ? `v${version} ` : ''}© deadraw `}</Text>
+
+    // Changes (git's ▾): each changed file with its line counts (a pick shows its diff), the commits
+    // waiting to push, then Ship, the whole diff and a pull request.
+    if (changesOpen) {
+      const closeChanges = () => void update($, isChangesOpen, () => false)
+      const stats = g.stats ?? []
+      const paths = stats.map(s => s.path)
+      const toPush = g.toPush ?? []
+      const pathMax = Math.max(16, Math.min(48, cols - 24, Math.max(...stats.map(s => s.path.length), 0) + 2))
+      const fitPath = (p: string) => (p.length > pathMax ? `…${p.slice(-(pathMax - 2))}` : p)
+      // Fixed-width cells, so the numbers line up even where the font is proportional (desktop).
+      const addW = Math.max(2, ...stats.map(s => `+${s.added}`.length))
+      const delW = Math.max(2, ...stats.map(s => `−${s.removed}`.length))
+      const canShip = (g.changed > 0 || g.ahead > 0) && !shipping
+      const canPr = g.isRepo && !DEFAULT_BRANCHES.has(g.branch) && !g.conflicts && !g.operation && !shipping
+      return (
+        <Box flexDirection="column">
+          {strip}
+          {title('changes', [g.branch, g.ahead ? `${g.ahead} to push` : '', g.behind ? `${g.behind} to pull` : ''].filter(Boolean).join(' · '))}
+          {stats.length === 0 && note('no changes since the last commit')}
+          {stats.slice(0, 9).map((s, i) => styledRow(`ch-${i}`, String(i + 1), (
+            <Box flexDirection="row">
+              <Box width={pathMax} flexShrink={0}><Text wrap="truncate">{fitPath(s.path)}</Text></Box>
+              {s.kind === 'edit' ? (
+                <Box flexDirection="row" gap={1} flexShrink={0}>
+                  <Box width={addW} justifyContent="flex-end"><Text color="success">{`+${s.added}`}</Text></Box>
+                  <Box width={delW} justifyContent="flex-end"><Text color="error">{`−${s.removed}`}</Text></Box>
+                </Box>
+              ) : (
+                <Box width={addW + 1 + delW} justifyContent="flex-end" flexShrink={0}><Text dimColor>{s.kind}</Text></Box>
+              )}
+            </Box>
+          ), () => void openDiff($, paths, i)))}
+          {stats.length > 9 && note(`+${stats.length - 9} more`)}
+          {toPush.length > 0 && rule}
+          {toPush.slice(0, 3).map((subject, i) => (
+            <Box key={`push-${i}`} marginLeft={4}><Text dimColor wrap="truncate">{`↑ ${shortLabel(subject, labelMax)}`}</Text></Box>
+          ))}
+          {toPush.length > 3 && note(`+${toPush.length - 3} more to push`)}
+          {rule}
+          <Box flexDirection="row" width={cols} justifyContent="space-between">
+            <Box flexDirection="row" gap={1} marginLeft={2}>
+              {canShip && <Button key="ch-ship" variant="primary" label="Ship" onPress={() => { closeChanges(); void ship($) }} />}
+              {stats.length > 0 && <Button key="ch-diff" label={`+${g.added ?? 0} −${g.removed ?? 0}`} onPress={() => void openDiff($, paths, 0)} />}
+              {canPr && <Button key="ch-pr" label="Create PR" onPress={() => { closeChanges(); void createPr($) }} />}
+            </Box>
+            <Button key="ch-close" role="dismiss" label="Close" onPress={closeChanges} />
+          </Box>
+        </Box>
+      )
+    }
 
     // /strip panel: one row per part, ● on / ○ off, saved for every project.
     if (isMenuOpen) {
@@ -2004,6 +2293,32 @@ export const register: Register = on => {
         <Box flexDirection="row" gap={1} marginTop={1}>
           {firstStep && <Button key="continue" variant="primary" label="Continue with 1" onPress={() => fill(firstStep)} />}
           <Button key="dismiss" role="dismiss" label="Dismiss" onPress={() => void $.ui.close({ id: BRIEF_PANE })} />
+        </Box>
+      </Box>
+    )
+  })
+
+  // ── the diff pane ─────────────────────────────────────────────
+
+  on('ui.render', { component: 'Pane', requestId: DIFF_PANE }, async ($, e) => {
+    const { Box, Text, Button, Code } = $.ui.resolve(e)
+    const v = await read($, diffView)
+    if (!v) return <Text dimColor>No diff open.</Text>
+    const path = v.paths[v.index] ?? ''
+    const count = v.paths.length
+    const go = (i: number) => void openDiff($, v.paths, (i + count) % count)
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Text bold>{path}</Text>
+          {count > 1 && <Text dimColor>{`${v.index + 1} of ${count}`}</Text>}
+        </Box>
+        {v.text ? <Code source={v.text} format="diff" path={path} /> : null}
+        {v.note && <Text dimColor italic>{v.note}</Text>}
+        <Box flexDirection="row" gap={1} marginTop={1}>
+          {count > 1 && <Button key="diff-prev" label="‹ Previous" onPress={() => go(v.index - 1)} />}
+          {count > 1 && <Button key="diff-next" label="Next ›" onPress={() => go(v.index + 1)} />}
+          <Button key="diff-close" role="dismiss" label="Close" onPress={() => void $.ui.close({ id: DIFF_PANE })} />
         </Box>
       </Box>
     )
