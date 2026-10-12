@@ -86,6 +86,31 @@ export type NextState = {
   model: string | null
 }
 
+/** One helper agent of this task: what it does, since when, and how it ended. */
+export type Helper = {
+  /** The agent's id, as its own turn.complete carries it. */
+  id: string
+  /** The Agent call's few words ("Price check: Panera"). */
+  task: string
+  startedAt: number
+  endedAt: number | null
+  status: 'running' | 'done' | 'failed'
+}
+
+/**
+ * Helper agents for one task: at most `cap` of them (null: Auto, Claude decides), on the same model or
+ * one below it. Armed until the first main turn that used helpers ends, then back to Auto and the same model.
+ */
+export type AgentsState = {
+  cap: number | null
+  model: 'same' | 'fast'
+  /** The Custom chip is picked: its − N + stepper shows. */
+  isCustom: boolean
+  isOpen: boolean
+  /** The helpers started since your last prompt: the panel lists them, the strip counts the running ones. */
+  helpers: Helper[]
+}
+
 /** The handoff flow in the strip's row: the draft to confirm, then the saved file. */
 export type HandoffStep =
   | { stage: 'draft'; path: string; name: string; text: string; previous: string; added: number; removed: number; isNew: boolean }
@@ -133,6 +158,8 @@ declare module 'claude-code' {
       rowAsk: { text: string; options: string[] } | null
       /** The changes panel under the strip (a click on git's ▾). */
       isChangesOpen: boolean
+      /** Helper agents: the cap and model for the task, and the helpers it started (◈ on the strip). */
+      agents: AgentsState
       /** The file the diff pane shows, or null. */
       diffView: DiffView | null
       /** /strip demo: sample values for screenshots (green, yellow, red, next, ideas), or null. */

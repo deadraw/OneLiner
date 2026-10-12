@@ -2,7 +2,7 @@
 
 # OneLiner
 
-**A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, git changes and ship, and next-step ideas - in one line above your prompt.**
+**A calm instrument strip for Claude Code: 5-hour limit with forecast, prompt-cache countdown, context fill, git changes and ship, helper agents, and next-step ideas - in one line above your prompt.**
 
 [![Latest release](https://img.shields.io/github/v/release/deadraw/OneLiner?label=release&color=6a6ae4)](https://github.com/deadraw/OneLiner/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-e34a9e)](LICENSE)
@@ -46,6 +46,7 @@ Working with Claude Code all day, the same things keep costing time:
 |---|---|---|---|---|
 | **git** | branch, changed files (Δ), unpushed (↑), behind (↓) | clean and pushed | changes not shipped / behind (**▴** opens the changes panel with **Ship**) | merge conflict, rebase stopped halfway, diverged |
 | **dev** | your local dev server | running | - | build error (gray when off, + **Start**) |
+| **◈ agents** | helpers Claude runs for this task: how many are working, or the number you set (`◈ 3`) | helpers working | - | - |
 | **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **Handoff** button) |
 | **ctx** | context window fill and tokens | ≤ 49% | 50–70% | ≥ 71% (+ **Handoff** and **Compact** buttons) |
 | **cache** | minutes until the prompt cache expires · % of the last turn read from cache | ≥ half the lifetime left | 25–50% left | < 25% left, cold, or reset (+ **Compact** from 30% context) |
@@ -65,8 +66,8 @@ In the desktop app, point at any part of the strip to see more, written into the
 | Part | Hover shows |
 |---|---|
 | **git** | one changed file with its lines (`register.tsx +12 −3`), or how many and their lines (`4 edits +43 −18`); the last commit's files and age (`last: handoff.md, problem.c · 7m ago`) |
-| **dev** | the server address, or the full build error |
-| **5h limit** | reset time, fill forecast, weekly window, and what this session has cost (`$2.43`) |
+| **dev** | the server address, or the full build error; while it runs, **■** stops it and **↻** restarts it (whoever started it: **Start**, Claude or a terminal) |
+| **5h limit** | reset time, fill forecast, weekly window, what this session has cost (`$2.43`), and `↑ 3 agents` while helpers are using it |
 | **ctx** | free space and window size, with **📝** (handoff) and **♻️** (compact) at any fill level |
 | **cache** | when it expires if you stay idle, and its lifetime |
 
@@ -80,7 +81,19 @@ Token counts read the way you'd say them: `482k`, `1M`, `1.2M`.
 - the commits waiting to push
 - **Ship**, **+68 −31** (the whole diff, file by file) and, on a branch other than `main`, **Create PR**: asked in a row under the strip as **Create** or **Draft**, it pushes the branch if needed and opens the pull request with the GitHub CLI (`gh`), its title and description written from the commits. Without `gh`, the request is put in the prompt for Claude.
 
-On a narrow window the strip first drops the optional extras (switch hint, `% read`, `7d`), then switches to short labels (`main 4Δ 2↑`, `5h 78% →03:03`, `⏱22m`), and only then drops whole parts: **dev**, **git**, **ctx**. **Limit** and **cache** always stay.
+### Agents
+
+**◈** on the right opens the agents panel: how many helper agents Claude may use for your **next task**, and on which model.
+
+- **helpers**: **Auto** (Claude decides, as without OneLiner), **1 3 5 10 15 20**, or **Custom** with a **− N +** stepper from 1 to 20.
+- **model**: **Same model**, or **Fast & cheap**: one model below yours (Opus → Sonnet, Sonnet → Haiku), for helpers whose call names no model.
+- Every helper of the task gets a colored row with what it does, how long it has worked, and ✓ when done (✕ when it failed).
+
+With a number set, Claude is asked to split the task into up to that many parallel helpers where the work really splits, never padding it with work that isn't needed. A helper past the number is refused with a reason, and Claude carries on with the ones it has; helpers started by helpers count too.
+
+The setting is for one task: once an answer that used helpers is done (and they are all back), it returns to **Auto** and **Same model**. An answer without helpers, such as a question back to you, keeps it. Every new session starts on Auto, and **Back to Auto** resets it by hand. `◈ ▾` closes the panel; it stays open while you send, so you can watch the helpers work.
+
+On a narrow window the strip first drops the optional extras (switch hint, `% read`, `7d`), then switches to short labels (`main 4Δ 2↑`, `5h 78% →03:03`, `⏱22m`), and only then drops whole parts: **dev**, **git**, **ctx**. **Limit** and **cache** always stay, and so does **dev** while it offers **Start**.
 
 ## The next list
 
@@ -107,7 +120,8 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 | `/handoff` | Writes or updates your `CURRENT.md` / `HANDOFF.md` from the conversation, keeping its structure; any conversation works, coding or not. A row under the strip asks **Write** / **Cancel**, then offers **Clear & continue** (clears the chat; Claude reads the handoff, tells you where you left off and proposes next steps, then waits for you), **Clear**, or **Not now**. Keeps a backup of the previous file. Also on the **Handoff** button (red ctx, or near the 5-hour wall) and **📝** in the ctx hover. |
 | `/limits` | A chart of the current 5-hour window: usage so far, pace, forecast, reset time, weekly window. |
 | `/brief` | Where you left off in this project: **Goal**, **Done** and up to three **Next** steps, each on its own line in full and one click (or key 1-3) into the prompt box; plus branch, unpushed and changed files and the last commit. Also opens by itself after 6+ hours away and after a compaction. |
-| `/strip` | Turn strip parts on or off (`/strip cache`, `/strip all`). Saved for all projects. |
+| `/strip` | Turn strip parts on or off (`/strip cache`, `/strip agents`, `/strip all`). Saved for all projects. |
+| `/strip agents 5` | Up to 5 helpers for the next task (1-20); `/strip agents auto` goes back to Auto. |
 | `/strip demo green` | Sample values for screenshots: `green`, `yellow`, `red`, `next` (the list open), `ideas` (graded ideas), or `play` to loop through all of them for a screen recording. Buttons are off and nothing is spent; `/strip demo off` returns to your real values. |
 
 ## Popups (only when they matter)
@@ -215,6 +229,7 @@ Almost nothing. Everything on the strip is read from data Claude Code already ha
 | `/ship` commit message | one short Claude Sonnet call |
 | **Create PR** title and description | one short Claude Sonnet call |
 | Changes panel and diff pane | free |
+| Agents panel and its setting | free. The helpers themselves are Claude working: each runs its own context, so several at once use your limit faster. **Fast & cheap** runs them one model below yours |
 | Handoff note before compaction (`.claude/handoff.md`) | one question over the cached conversation, once per compaction (Claude Sonnet when there is nothing cached yet) |
 
 ## Privacy

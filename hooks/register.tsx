@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Brief, HandoffStep, CacheState, ContextState, DevState, DiffView, FileStat, GitState, LimitState, NextState } from '../types'
+import type { AgentsState, Brief, HandoffStep, CacheState, ContextState, DevState, DiffView, FileStat, GitState, Helper, LimitState, NextState } from '../types'
 
 const CACHE_TTL_MIN = 60 // subscription default
 const CACHE_TTL_OVERAGE_MIN = 5 // extra usage / reported 5m
@@ -62,6 +62,8 @@ const hidden = atom({ plugin: 'oneliner', key: 'hidden' } as const, [] as string
 const stripMenu = atom({ plugin: 'oneliner', key: 'isStripMenuOpen' } as const, false)
 const isChangesOpen = atom({ plugin: 'oneliner', key: 'isChangesOpen' } as const, false)
 const diffView = atom({ plugin: 'oneliner', key: 'diffView' } as const, null as DiffView | null)
+const AGENTS_IDLE: AgentsState = { cap: null, model: 'same', isCustom: false, isOpen: false, helpers: [] }
+const agents = atom({ plugin: 'oneliner', key: 'agents' } as const, AGENTS_IDLE)
 const now = atom({ plugin: 'oneliner', key: 'now' } as const, 0)
 const brief = atom({ plugin: 'oneliner', key: 'brief' } as const, null)
 const isShipping = atom({ plugin: 'oneliner', key: 'isShipping' } as const, false)
@@ -582,6 +584,7 @@ async function reloadStrip($: $, cwd: string, isFresh: boolean) {
     update($, nextSteps, (s): NextState => ({ ...s, isOpen: false, view: 'main' })),
     update($, stripMenu, () => false),
     update($, isChangesOpen, () => false),
+    update($, agents, a => ({ ...a, isOpen: false })),
     update($, diffView, () => null),
     update($, handoffStep, () => null),
     update($, demo, () => null),
@@ -602,6 +605,51 @@ async function reloadStrip($: $, cwd: string, isFresh: boolean) {
   await update($, now, () => at)
   loadReadings($, cwd, at)
   $.ui.toast(isFresh ? 'OneLiner reloaded fresh: saved answers and project data forgotten' : 'OneLiner reloaded')
+}
+
+// ── helper agents ───────────────────────────────────────────────
+
+const AGENT_SIZES = [1, 3, 5, 10, 15, 20] // the chips; Custom steps 1 to AGENT_MAX
+const AGENT_MAX = 20 // Claude Code runs at most 20 agents at once by default: no queue needed below it
+// One color per helper, in turn: its dot in the panel and its seat in the row of seats.
+const HELPER_COLORS = ['#EE9D5B', '#6a6ae4', '#4fb38a', '#F7D35C', '#e34a9e', '#5bb6ee', '#c48cf0', '#e36a5b']
+const AGENTS_ARMED_COLOR = '#6a6ae4' // ◈ N before the task starts: set, not yet running
+
+/** Set for the next task: a cap, or the model one below. */
+const isArmed = (a: AgentsState) => a.cap !== null || a.model === 'fast'
+
+/** Fast & cheap: the model one below the one you are on (Haiku has none below it). */
+function stepDown(model: string): 'opus' | 'sonnet' | 'haiku' | null {
+  if (/fable/i.test(model)) return 'opus'
+  if (/opus/i.test(model)) return 'sonnet'
+  if (/sonnet/i.test(model)) return 'haiku'
+  return null
+}
+
+const modelName = (alias: string) => alias[0]!.toUpperCase() + alias.slice(1)
+
+/** What Claude reads beside your prompt while a cap is set: split where the work really splits, never past the cap. */
+function helperInstruction(cap: number): string {
+  const many = cap === 1 ? 'one helper' : `${cap} helpers`
+  return [
+    `Helper agents for this task: up to ${many}, set by the user in OneLiner.`,
+    'Where the work splits into independent pieces (one per file, item, section or question), launch one helper',
+    '(the Agent tool) per piece, all in one message so they run in parallel,',
+    `at most ${cap} in total for this task. Give each helper a short description of 3 to 5 words.`,
+    'Never pad with work that is not needed: if the task does not split, do it yourself.',
+    'When the helpers finish, combine their results into one answer.',
+  ].join(' ')
+}
+
+/** m:ss since a helper started (or how long it took). */
+function helperClock(h: Helper, at: number): string {
+  const secs = Math.max(0, Math.round(((h.endedAt ?? at) - h.startedAt) / 1000))
+  return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
+}
+
+/** Back to Auto and the same model, the helpers' list kept for a look. */
+async function disarmAgents($: $) {
+  await update($, agents, (a): AgentsState => ({ ...a, cap: null, model: 'same', isCustom: false }))
 }
 
 // ── dev server ──────────────────────────────────────────────────
@@ -626,16 +674,63 @@ async function detectDev($: $, cwd: string): Promise<{ port: number; argv: strin
   return { port, argv: wrap(['npm', 'run', 'dev']) }
 }
 
+let isProbing = false // one probe at a time
+let devProc: AsyncGenerator<unknown, unknown> | null = null // the server Start launched, while it runs
+
 async function probeDev($: $) {
   const d = await read($, dev)
-  if (d.port === null || d.status === 'starting') return
+  if (d.port === null || d.status === 'starting' || isProbing) return
+  isProbing = true
   try {
     const r = await $.http.fetch(`http://localhost:${d.port}/`)
     const error = r.status >= 500 ? firstErrorLine(r.text) : null
-    await update($, dev, (cur): DevState => ({ ...cur, status: error ? 'error' : 'up', error }))
+    const status = error ? 'error' : 'up'
+    // Written only when it changed: every write redraws the strip, which would close an open hover.
+    if (d.status !== status || d.error !== error) await update($, dev, (cur): DevState => (cur.status === 'starting' ? cur : { ...cur, status, error }))
   } catch {
-    await update($, dev, (cur): DevState => ({ ...cur, status: 'down' }))
+    if (d.status !== 'down') await update($, dev, (cur): DevState => (cur.status === 'starting' ? cur : { ...cur, status: 'down' }))
+  } finally {
+    isProbing = false
   }
+}
+
+/**
+ * Ends whatever listens on the port, with its child processes: the server Start launched, or one
+ * started by Claude or in a terminal. `cmd /c npm run dev` alone would leave node running on Windows.
+ */
+async function killPort($: $, cwd: string, port: number) {
+  try {
+    if (isWindows(cwd)) {
+      const { stdout } = await $.process.run(['netstat', '-ano'])
+      const pids = new Set<string>()
+      for (const line of stdout.split(/\r?\n/)) {
+        // A listening socket's remote end is *:0; the state word ("LISTENING") is translated on some Windows.
+        const [proto, local, remote, , pid] = line.trim().split(/\s+/)
+        if (proto === 'TCP' && local?.endsWith(`:${port}`) && remote?.endsWith(':0') && pid && pid !== '0') pids.add(pid)
+      }
+      for (const pid of pids) await $.process.run(['taskkill', '/PID', pid, '/T', '/F']).catch(() => null)
+    } else {
+      const { stdout } = await $.process.run(['lsof', '-ti', `tcp:${port}`, '-sTCP:LISTEN'])
+      for (const pid of stdout.split(/\s+/).filter(x => /^\d+$/.test(x))) await $.process.run(['kill', pid]).catch(() => null)
+    }
+  } catch {}
+}
+
+/** ■ on the dev part's hover: the server stops, the strip says so at once. */
+async function stopDev($: $, cwd: string) {
+  const d = await read($, dev)
+  if (d.port === null) return
+  const proc = devProc
+  devProc = null
+  void proc?.return(undefined).catch(() => {})
+  await killPort($, cwd, d.port)
+  await update($, dev, (cur): DevState => ({ ...cur, status: 'down', error: null }))
+}
+
+/** ↻ on the dev part's hover: stop, then start again. */
+async function restartDev($: $, cwd: string) {
+  await stopDev($, cwd)
+  await startDev($, cwd)
 }
 
 function firstErrorLine(text: string): string {
@@ -648,9 +743,11 @@ async function startDev($: $, cwd: string) {
   const found = await detectDev($, cwd)
   if (!found) return
   await update($, dev, (cur): DevState => ({ ...cur, status: 'starting', error: null }))
+  const proc = $.process.spawn({ argv: found.argv })
+  devProc = proc
   void (async () => {
     try {
-      for await (const piece of $.process.spawn({ argv: found.argv })) {
+      for await (const piece of proc) {
         if ('text' in piece && /error/i.test(piece.text)) {
           await update($, dev, (cur): DevState => ({ ...cur, error: (piece.text.trim().split('\n')[0] ?? '').slice(0, 100) }))
         }
@@ -659,6 +756,8 @@ async function startDev($: $, cwd: string) {
         }
       }
     } catch {}
+    if (devProc !== proc && devProc !== null) return // ↻ started a new one
+    devProc = null
     await update($, dev, (cur): DevState => ({ ...cur, status: 'down' }))
   })()
 }
@@ -976,6 +1075,7 @@ const STRIP_PARTS: { id: string; label: string; words: string[] }[] = [
   { id: 'limit', label: '5h limit', words: ['limit', '5h', 'limits'] },
   { id: 'context', label: 'context', words: ['context', 'ctx'] },
   { id: 'cache', label: 'cache', words: ['cache', 'clock'] },
+  { id: 'agents', label: 'agents', words: ['agents', 'helpers'] },
   { id: 'next', label: 'next', words: ['next', 'ideas', 'suggestions'] },
 ]
 const HIDDEN_KEY = 'strip:hidden' // one $.store value: the same for every project and session
@@ -1419,6 +1519,8 @@ export const register: Register = on => {
   let lastRequestAt: number | null = null
   let lastEffort: string | null = null // the effort the last main request used
   let demoTimer: { cancel: () => void } | null = null // /strip demo play
+  let spawnedThisTask = 0 // helpers started since your last prompt, counted before each one starts (parallel calls race)
+  let sessionModel = '' // the model you are on: what Fast & cheap steps down from
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
@@ -1433,7 +1535,7 @@ export const register: Register = on => {
         $.command.register({
           name: 'strip',
           description: 'Turn strip parts on or off (all projects)',
-          argumentHint: '[git|dev|limit|context|cache|next|all] or demo [green|yellow|red|next|ideas|play|off] or reload [fresh]',
+          argumentHint: '[git|dev|limit|context|cache|agents|next|all] or agents [1-20|auto] or demo [green|yellow|red|next|ideas|play|off] or reload [fresh]',
         }),
       ]),
       $.store.get(HIDDEN_KEY),
@@ -1445,6 +1547,24 @@ export const register: Register = on => {
     ])
 
     loadReadings($, cwd, at)
+    void $.session.model().then(m => { sessionModel = m }).catch(() => {})
+    // A server stopped (or started) outside OneLiner shows within seconds: every 5 s while it runs, 15 s while down.
+    let devTicks = 0
+    $.clock.every(5_000, () => {
+      devTicks += 1
+      void (async () => {
+        const d = await read($, dev)
+        if (d.port === null) return
+        if (d.status === 'up' || d.status === 'error' || devTicks % 3 === 0) await probeDev($)
+      })()
+    })
+    // The helpers' timers tick every second, only while the agents panel is open and one is running.
+    $.clock.every(1_000, () => {
+      void (async () => {
+        const a = await read($, agents)
+        if (a.isOpen && a.helpers.some(h => h.status === 'running')) await update($, now, () => Date.now())
+      })()
+    })
     void (async () => {
       const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
       if (stored && (at - stored.lastAt) / 3_600_000 >= BRIEF_GAP_HOURS) await openBrief($, cwd, stored, at)
@@ -1485,12 +1605,75 @@ export const register: Register = on => {
     if ((await read($, nextSteps)).isOpen) await update($, nextSteps, s => ({ ...s, isOpen: false }))
     if (await read($, stripMenu)) await update($, stripMenu, () => false)
     if (await read($, isChangesOpen)) await update($, isChangesOpen, () => false)
+    // A new task (your own prompt, not a helper's result coming back) starts the count again; while a cap
+    // is set, Claude reads the split instruction beside the prompt.
+    const isFromYou = !['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay'].includes(e.origin.kind)
+    if (isFromYou && e.text.trim() && !e.text.startsWith('/')) {
+      spawnedThisTask = 0
+      const a = await update($, agents, (s): AgentsState => ({ ...s, helpers: [] }))
+      if (a.cap !== null) return next({ ...e, context: [...(e.context ?? []), helperInstruction(a.cap)] })
+    }
     return next(e)
+  })
+
+  // Helper agents: never past the cap for this task; Fast & cheap starts them one model below yours.
+  on('agent.spawn', async ($, e, next) => {
+    const a = await read($, agents)
+    if (e.parentModel) sessionModel = e.parentModel
+    if (a.cap !== null && spawnedThisTask >= a.cap) {
+      return { deny: `The helper cap for this task is ${a.cap}, and ${a.cap === 1 ? 'that helper has' : `all ${a.cap} have`} started. Carry on with them, or do the rest yourself.` }
+    }
+    spawnedThisTask += 1
+    const below = a.model === 'fast' && !e.fork && !e.model ? stepDown(e.parentModel) : null
+    const result = await next(below ? { ...e, model: below } : e)
+    if (result.deny !== undefined) {
+      spawnedThisTask -= 1
+      return result
+    }
+    if (result.agentId) {
+      const helper: Helper = { id: result.agentId, task: e.description || 'helper', startedAt: await $.clock.now(), endedAt: null, status: 'running' }
+      await update($, agents, (s): AgentsState => ({ ...s, helpers: [...s.helpers, helper] }))
+    }
+    return result
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId) return result
+    if (e.agentId) {
+      // A helper's own turn ends it.
+      const agentId = e.agentId
+      const isFailed = e.reason === 'error' || e.isAborted
+      const at = await $.clock.now()
+      await update($, agents, (s): AgentsState => ({
+        ...s, helpers: s.helpers.map(h => (h.id === agentId && h.status === 'running' ? { ...h, status: isFailed ? 'failed' : 'done', endedAt: at } : h)),
+      }))
+      return result
+    }
+    void (async () => {
+      // The main turn that used helpers ends the setting, once they are all back.
+      const a = await read($, agents)
+      if (!a.helpers.some(h => h.status === 'running')) {
+        if (isArmed(a) && a.helpers.length > 0) await disarmAgents($)
+        return
+      }
+      // A helper whose end never came through: the engine's own list says how it stands (gone from it: done).
+      const list = await $.agent.list().catch(() => null)
+      if (!list) return
+      const at = await $.clock.now()
+      const byId = new Map(list.map(x => [x.id, x.status]))
+      const s = await update($, agents, (s): AgentsState => ({
+        ...s,
+        helpers: s.helpers.map(h => {
+          if (h.status !== 'running') return h
+          const status = byId.get(h.id)
+          if (status === 'running' || status === 'pending' || status === 'waiting') return h
+          return { ...h, status: status === 'failed' || status === 'killed' ? 'failed' : 'done', endedAt: at }
+        }),
+      }))
+      // Still running (in the background): the main turn their results start ends it.
+      if (isArmed(s) && s.helpers.length > 0 && !s.helpers.some(h => h.status === 'running')) await disarmAgents($)
+    })()
+    if (e.usage?.model) sessionModel = e.usage.model
     const options = extractNextSteps(e.answer)
     await update($, nextSteps, (): NextState => ({
       isOpen: false, fromAnswer: options, ai: [], aiGrades: [], optionGrades: options.map(recommendedGrade), aiStatus: 'idle', aiVia: null,
@@ -1697,7 +1880,7 @@ export const register: Register = on => {
     if (word === '') {
       await update($, nextSteps, s => ({ ...s, isOpen: false }))
       await update($, stripMenu, () => true)
-      return { text: 'Strip parts: press 1–6 to switch one on or off, 0 to close.' }
+      return { text: `Strip parts: press 1–${STRIP_PARTS.length} to switch one on or off, 0 to close.` }
     }
     if (word.startsWith('demo')) {
       const level = word.split(/\s+/)[1] ?? 'green'
@@ -1729,6 +1912,21 @@ export const register: Register = on => {
       await reloadStrip($, cwd, word === 'reload fresh')
       return {}
     }
+    if (word === 'agents' || word.startsWith('agents ')) {
+      const arg = word.slice('agents'.length).trim()
+      if (arg === '') {
+        await update($, agents, a => ({ ...a, isOpen: true }))
+        return {}
+      }
+      if (arg === 'auto' || arg === 'off') {
+        await disarmAgents($)
+        return { text: 'Helper agents: Auto, Claude decides.' }
+      }
+      const size = /^\d+$/.test(arg) ? Number(arg) : NaN
+      if (!(size >= 1 && size <= AGENT_MAX)) return { text: `Helpers for the next task: a whole number from 1 to ${AGENT_MAX}, or auto. e.g. /strip agents 5` }
+      await update($, agents, (a): AgentsState => ({ ...a, cap: size, isCustom: !AGENT_SIZES.includes(size) }))
+      return { text: `Up to ${size} helper${size === 1 ? '' : 's'} for the next task, then back to Auto.` }
+    }
     if (word === 'all' || word === 'reset') {
       await setHidden($, [])
       return { text: 'All strip parts are on.' }
@@ -1758,6 +1956,9 @@ export const register: Register = on => {
     ])
     const demoLevel = (await read($, demo)) as DemoLevel | null
     const changesOpen = await read($, isChangesOpen)
+    const ag = await read($, agents)
+    const agentsOpen = ag.isOpen
+    const runningHelpers = ag.helpers.filter(h => h.status === 'running').length
     if (demoLevel) ({ g, d, l, c, ctx, n } = demoFixture(demoLevel, at || Date.now(), n))
     // Past its reset the window is empty, even before the next turn reports a new reading.
     if (l.resetsAt && (at || Date.now()) >= Date.parse(l.resetsAt)) l = { ...l, percent: 0, resetsAt: null, samples: [] }
@@ -1784,6 +1985,7 @@ export const register: Register = on => {
       if (isOpening) {
         await update($, nextSteps, (s): NextState => ({ ...s, isOpen: false }))
         await update($, stripMenu, () => false)
+        await update($, agents, a => ({ ...a, isOpen: false }))
         void refreshGit($)
       }
       await update($, isChangesOpen, () => isOpening)
@@ -1827,7 +2029,7 @@ export const register: Register = on => {
     if (d.port !== null) {
       const map = {
         up: { text: `:${d.port}`, color: 'success' },
-        down: { text: isTight ? `:${d.port} ↓` : `:${d.port} down`, dim: true },
+        down: { text: `:${d.port}`, dim: true }, // Start beside it says it's down
         starting: { text: `:${d.port} starting…`, dim: true },
         error: { text: isTight ? 'build ✗' : `build error`, color: 'error' },
         none: { text: '', dim: true },
@@ -1838,7 +2040,13 @@ export const register: Register = on => {
         button: d.status === 'down' ? { label: 'Start', onPress: () => void startDev($, cwd) } : undefined,
         detail: d.status === 'error' ? (d.error ?? 'see the dev server output')
           : d.status === 'up' ? `http://localhost:${d.port}`
+          : d.status === 'starting' ? `localhost:${d.port}`
           : d.status === 'down' ? `localhost:${d.port} is not running` : '',
+        // While it runs: ■ stops it, ↻ stops and starts it again.
+        detailButtons: d.status === 'up' || d.status === 'error' || d.status === 'starting' ? [
+          { label: '■', onPress: () => void stopDev($, cwd) },
+          { label: '↻', onPress: () => void restartDev($, cwd) },
+        ] : undefined,
         detailMode: 'push',
       })
     }
@@ -1866,6 +2074,8 @@ export const register: Register = on => {
           ? { label: 'Handoff', onPress: () => void writeHandoff($, cwd) }
           : undefined,
         detail: [
+          // Helpers each run a context of their own: say why the limit climbs while they work.
+          runningHelpers > 0 ? `↑ ${runningHelpers} agent${runningHelpers === 1 ? '' : 's'}` : '',
           l.resetsAt ? `resets ${hhmm(l.resetsAt)}` : '',
           fullAt !== null ? `full ~${hhmmAt(fullAt)}` : '',
           l.weekPercent !== null ? `7d ${Math.round(l.weekPercent)}%` : '',
@@ -1939,9 +2149,19 @@ export const register: Register = on => {
     // next steps toggle
     const toggleNext = () => {
       void update($, isChangesOpen, () => false)
+      void update($, agents, a => ({ ...a, isOpen: false }))
       void update($, nextSteps, (s): NextState => ({ ...s, isOpen: !s.isOpen, view: 'main' }))
     }
-    if (!changesOpen) segs.push({
+    const toggleAgents = () => void (async () => {
+      const isOpening = !(await read($, agents)).isOpen
+      if (isOpening) {
+        await update($, nextSteps, (s): NextState => ({ ...s, isOpen: false }))
+        await update($, stripMenu, () => false)
+        await update($, isChangesOpen, () => false)
+      }
+      await update($, agents, a => ({ ...a, isOpen: isOpening }))
+    })()
+    if (!changesOpen && !agentsOpen) segs.push({
       id: 'next', text: '',
       button: { label: n.isOpen ? 'next ▾' : n.fromAnswer.length ? `next ${n.fromAnswer.length} ▴` : 'next ▴', onPress: toggleNext },
     })
@@ -1958,7 +2178,9 @@ export const register: Register = on => {
     const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + 5 : 0)
       + (s.toggle ? 2 : 0)
       + (s.buttons ?? []).reduce((w, b) => w + b.label.length + 5, 0) + 3
-    const total = (list: Seg[]) => list.reduce((n, s) => n + width(s), 0)
+    // ◈ (and its count) sits on the right with next: its room counts too.
+    const agentsWidth = hiddenParts.includes('agents') ? 0 : 4 + (runningHelpers > 0 || ag.cap !== null ? 6 : 0)
+    const total = (list: Seg[]) => list.reduce((n, s) => n + width(s), agentsWidth)
     let shown = segs.filter(s => !hiddenParts.includes(s.id))
     for (const level of [1, 2, 3]) {
       if (total(shown) <= cols) break
@@ -1966,7 +2188,9 @@ export const register: Register = on => {
     }
     // Still too wide: shorter labels before losing any part.
     if (total(shown) > cols) shown = shown.map(compactSeg)
-    const dropOrder = ['dev', 'git', 'context', 'next']
+    // A dev part with Start goes last: it's the only way to start the server from here.
+    const isDevActionable = shown.some(s => s.id === 'dev' && s.button)
+    const dropOrder = isDevActionable ? ['git', 'context', 'next', 'dev'] : ['dev', 'git', 'context', 'next']
     for (const id of dropOrder) {
       if (total(shown) <= cols) break
       shown = shown.filter(s => s.id !== id)
@@ -1997,6 +2221,22 @@ export const register: Register = on => {
             <Box key={`${s.id}-main`} flexDirection="row">
               {s.text !== '' && <Text color={s.color} dimColor={s.dim} wrap="truncate">{s.text}</Text>}
               {(s.extras ?? []).map(x => <Text color={x.color} dimColor={x.dim} wrap="truncate">{x.text}</Text>)}
+              {/* The part's buttons sit before the detail, so it opening never moves them; keyed apart, so the
+                  pointer on them doesn't open it either. */}
+              {(s.button || s.toggle || (s.buttons ?? []).length > 0) && (
+                <Box key={`${s.id}-acts`} flexDirection="row" gap={1} marginLeft={1}>
+                  {/* A button and the panel's arrow sit tight together, no gap. */}
+                  {s.button && s.toggle && (
+                    <Box flexDirection="row">
+                      <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />
+                      <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />
+                    </Box>
+                  )}
+                  {s.button && !s.toggle && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
+                  {s.toggle && !s.button && <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />}
+                  {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
+                </Box>
+              )}
               {s.detail && (
                 s.detailMode === 'over'
                   // Written over the parts to its right while hovered, on the same line: nothing moves.
@@ -2010,32 +2250,33 @@ export const register: Register = on => {
                     </Box>
               )}
             </Box>
-            {/* A button and the panel's arrow sit tight together, no gap. */}
-            {s.button && s.toggle && (
-              <Box flexDirection="row">
-                <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />
-                <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />
-              </Box>
-            )}
-            {s.button && !s.toggle && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
-            {s.toggle && !s.button && <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />}
-            {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
           </Box>
         ))}
         </Box>
-        {nextSeg?.button && (
-          // A Button can't be colored: "next" carries the gradient, the arrow is a full bracketed button.
-          <Box flexDirection="row" gap={1} flexShrink={0} marginLeft={1}>
-            {gradient(nextSeg.button.label.replace(/\s*[▾▴]$/, ''), IDEAS_FROM, IDEAS_TO)}
-            <Button key="next-btn" plain label={n.isOpen ? ' ▾  ' : ' ▴  '} onPress={nextSeg.button.onPress} />
-          </Box>
-        )}
+        <Box flexDirection="row" gap={1} flexShrink={0} marginLeft={1}>
+          {/* ◈ opens the agents panel; beside it the helpers working now, or the cap set for the next task. */}
+          {!hiddenParts.includes('agents') && (
+            <Box flexDirection="row">
+              <Button key="agents-btn" plain label={agentsOpen ? '◈ ▾' : '◈'} onPress={toggleAgents} />
+              {runningHelpers > 0
+                ? <Text color="success">{` ${runningHelpers}${ag.cap !== null ? `/${ag.cap}` : ''}`}</Text>
+                : ag.cap !== null ? <Text color={AGENTS_ARMED_COLOR}>{` ${ag.cap}`}</Text> : null}
+            </Box>
+          )}
+          {nextSeg?.button && (
+            // A Button can't be colored: "next" carries the gradient, the arrow is a full bracketed button.
+            <Box flexDirection="row" gap={1}>
+              {gradient(nextSeg.button.label.replace(/\s*[▾▴]$/, ''), IDEAS_FROM, IDEAS_TO)}
+              <Button key="next-btn" plain label={n.isOpen ? ' ▾  ' : ' ▴  '} onPress={nextSeg.button.onPress} />
+            </Box>
+          )}
+        </Box>
       </Box>
     )
     // Once after a marketplace install: auto-update, answered right here (never through the model).
     // A question in a row under the strip (Ship, resend): its options, the first one primary, and Cancel.
     const ask = demoLevel ? null : await read($, rowAsk)
-    if (!n.isOpen && !isMenuOpen && !changesOpen && ask) {
+    if (!n.isOpen && !isMenuOpen && !changesOpen && !agentsOpen && ask) {
       return (
         <Box flexDirection="column">
           {strip}
@@ -2051,7 +2292,7 @@ export const register: Register = on => {
     }
     // The handoff, one step at a time in a row under the strip: Write / Cancel, then start over from it or keep going.
     const step = demoLevel ? null : await read($, handoffStep)
-    if (!n.isOpen && !isMenuOpen && !changesOpen && step) {
+    if (!n.isOpen && !isMenuOpen && !changesOpen && !agentsOpen && step) {
       const close = () => void update($, handoffStep, () => null)
       return (
         <Box flexDirection="column">
@@ -2073,7 +2314,7 @@ export const register: Register = on => {
         </Box>
       )
     }
-    if (!n.isOpen && !isMenuOpen && !changesOpen && isOfferingUpdate && !demoLevel) {
+    if (!n.isOpen && !isMenuOpen && !changesOpen && !agentsOpen && isOfferingUpdate && !demoLevel) {
       return (
         <Box flexDirection="column">
           {strip}
@@ -2086,7 +2327,7 @@ export const register: Register = on => {
         </Box>
       )
     }
-    if (!n.isOpen && !isMenuOpen && !changesOpen) return strip
+    if (!n.isOpen && !isMenuOpen && !changesOpen && !agentsOpen) return strip
 
     // The slide-up: picks fill the prompt (never send), 1–4 / s / 0 as hotkeys.
     const pick = (text: string) => {
@@ -2140,6 +2381,81 @@ export const register: Register = on => {
     }
     const note = (text: string) => <Box marginLeft={4}><Text dimColor italic>{text}</Text></Box>
     const credit = <Text color={CREDIT_COLOR}>{`${version ? `v${version} ` : ''}© deadraw `}</Text>
+
+    // Agents (◈): how many helpers the next task may start and on which model, a seat for each, then
+    // the helpers of this task with what each does and for how long. Armed until a task used them.
+    if (agentsOpen) {
+      const setCap = (cap: number | null, isCustom = false) => void update($, agents, (a): AgentsState => ({ ...a, cap, isCustom }))
+      const setModel = (model: AgentsState['model']) => void update($, agents, (a): AgentsState => ({ ...a, model }))
+      const below = stepDown(sessionModel)
+      const customCap = ag.cap ?? 7
+      const step = (by: number) => setCap(Math.min(AGENT_MAX, Math.max(1, customCap + by)), true)
+      const chip = (key: string, label: string, isPicked: boolean, onPress: () => void) => (
+        <Button key={key} variant={isPicked ? 'primary' : undefined} label={label} onPress={onPress} />
+      )
+      const done = ag.helpers.filter(h => h.status === 'done').length
+      const failed = ag.helpers.filter(h => h.status === 'failed').length
+      const taskMax = Math.max(16, Math.min(44, cols - 22, Math.max(...ag.helpers.map(h => h.task.length), 0) + 2))
+      return (
+        <Box flexDirection="column">
+          {strip}
+          {title('◈ agents', isArmed(ag) ? 'for the next task · then Auto' : 'Auto · Claude decides', true)}
+          <Box flexDirection="row" gap={1} marginLeft={2}>
+            <Box width={8} flexShrink={0}><Text dimColor>helpers</Text></Box>
+            {chip('ag-auto', 'Auto', ag.cap === null, () => setCap(null))}
+            {AGENT_SIZES.map(size => chip(`ag-${size}`, String(size), ag.cap === size && !ag.isCustom, () => setCap(size)))}
+            {chip('ag-custom', ag.isCustom && ag.cap !== null ? `Custom ${ag.cap}` : 'Custom', ag.isCustom, () => setCap(customCap, true))}
+          </Box>
+          {ag.isCustom && (
+            <Box flexDirection="row" gap={1} marginLeft={11} marginTop={1}>
+              <Button key="ag-minus" label="−" onPress={() => step(-1)} />
+              <Text bold>{String(customCap).padStart(2)}</Text>
+              <Button key="ag-plus" label="+" onPress={() => step(1)} />
+              <Text dimColor>{`1 to ${AGENT_MAX}`}</Text>
+            </Box>
+          )}
+          {/* A line between the chip rows: buttons stacked tight clip each other on the desktop. */}
+          <Box flexDirection="row" gap={1} marginLeft={2} marginTop={1}>
+            <Box width={8} flexShrink={0}><Text dimColor>model</Text></Box>
+            {chip('ag-same', 'Same model', ag.model === 'same', () => setModel('same'))}
+            {chip('ag-fast', below ? `Fast & cheap · ${modelName(below)}` : 'Fast & cheap', ag.model === 'fast', () => setModel('fast'))}
+          </Box>
+          {ag.cap !== null && (
+            // One colored seat per helper the task may start.
+            <Box flexDirection="row" marginLeft={12}>
+              {Array.from({ length: ag.cap }, (_, i) => <Text color={HELPER_COLORS[i % HELPER_COLORS.length]}>{'● '}</Text>)}
+            </Box>
+          )}
+          {note(ag.cap === null
+            ? 'Claude decides how many helpers, if any'
+            : `up to ${ag.cap === 1 ? 'one helper' : `${ag.cap} helpers`}, in parallel where the work splits`)}
+          {ag.model === 'fast' && !below && note('already on the smallest model: helpers run on it too')}
+          {rule}
+          {ag.helpers.length === 0 && note('no helpers in this task yet')}
+          {ag.helpers.slice(0, 12).map((helper, i) => (
+            <Box key={`helper-${i}`} flexDirection="row" marginLeft={2} gap={1}>
+              <Text color={HELPER_COLORS[i % HELPER_COLORS.length]}>●</Text>
+              <Box width={taskMax} flexShrink={0}><Text wrap="truncate" dimColor={helper.status !== 'running'}>{helper.task}</Text></Box>
+              <Box width={6} flexShrink={0} justifyContent="flex-end"><Text dimColor>{helperClock(helper, at)}</Text></Box>
+              {helper.status === 'done' ? <Text color="success">✓</Text>
+                : helper.status === 'failed' ? <Text color="error">✕</Text>
+                : <Text color="warning">…</Text>}
+            </Box>
+          ))}
+          {ag.helpers.length > 12 && note(`+${ag.helpers.length - 12} more`)}
+          {ag.helpers.length > 0 && note([
+            runningHelpers ? `${runningHelpers} working` : '', done ? `${done} done` : '', failed ? `${failed} stuck` : '',
+          ].filter(Boolean).join(' · '))}
+          {/* No Close: ◈ ▾ on the strip closes the panel. */}
+          {isArmed(ag) && rule}
+          {isArmed(ag) && (
+            <Box flexDirection="row" marginLeft={2}>
+              <Button key="ag-reset" label="Back to Auto" onPress={() => void disarmAgents($)} />
+            </Box>
+          )}
+        </Box>
+      )
+    }
 
     // Changes (git's ▾): each changed file with its line counts (a pick shows its diff), the commits
     // waiting to push, then Ship, the whole diff and a pull request.
