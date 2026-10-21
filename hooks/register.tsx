@@ -642,8 +642,8 @@ function helperInstruction(cap: number): string {
 }
 
 /** m:ss since a helper started (or how long it took). */
-function helperClock(h: Helper, at: number): string {
-  const secs = Math.max(0, Math.round(((h.endedAt ?? at) - h.startedAt) / 1000))
+function helperClock(helper: Helper, at: number): string {
+  const secs = Math.max(0, Math.round(((helper.endedAt ?? at) - helper.startedAt) / 1000))
   return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
 }
 
@@ -1139,8 +1139,8 @@ const IDEAS_TO ='#e34a9e'
 
 /** The color `t` (0–1) of the way from one #rrggbb to another. */
 function mixHex(from: string, to: string, t: number): string {
-  const a = from.match(/[0-9a-f]{2}/gi)!.map(h => parseInt(h, 16))
-  const b = to.match(/[0-9a-f]{2}/gi)!.map(h => parseInt(h, 16))
+  const a = from.match(/[0-9a-f]{2}/gi)!.map(hex => parseInt(hex, 16))
+  const b = to.match(/[0-9a-f]{2}/gi)!.map(hex => parseInt(hex, 16))
   return '#' + a.map((v, i) => Math.round(v + ((b[i] ?? v) - v) * t).toString(16).padStart(2, '0')).join('')
 }
 const SUGGEST_PROMPT = [
@@ -1569,7 +1569,7 @@ function noteSections(markdown: string): BriefCache | null {
     if (heading) { current = (heading[1] ?? '').toLowerCase(); sections[current] = []; continue }
     if (current && raw.trim()) (sections[current] ??= []).push(raw.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, ''))
   }
-  const first = (name: string) => Object.entries(sections).find(([h]) => h.startsWith(name))?.[1] ?? []
+  const first = (name: string) => Object.entries(sections).find(([head]) => head.startsWith(name))?.[1] ?? []
   const next = first('next').slice(0, 3)
   const goal = first('goal')[0] ?? null
   if (!goal && !next.length) return null
@@ -1771,7 +1771,7 @@ export const register: Register = on => {
     $.clock.every(1_000, () => {
       void (async () => {
         const a = await read($, agents)
-        if (a.isOpen && a.helpers.some(h => h.status === 'running')) await update($, now, () => Date.now())
+        if (a.isOpen && a.helpers.some(helper => helper.status === 'running')) await update($, now, () => Date.now())
       })()
     })
     void (async () => {
@@ -1859,14 +1859,14 @@ export const register: Register = on => {
       const isFailed = e.reason === 'error' || e.isAborted
       const at = await $.clock.now()
       await update($, agents, (s): AgentsState => ({
-        ...s, helpers: s.helpers.map(h => (h.id === agentId && h.status === 'running' ? { ...h, status: isFailed ? 'failed' : 'done', endedAt: at } : h)),
+        ...s, helpers: s.helpers.map(helper => (helper.id === agentId && helper.status === 'running' ? { ...helper, status: isFailed ? 'failed' : 'done', endedAt: at } : helper)),
       }))
       return result
     }
     void (async () => {
       // The main turn that used helpers ends the setting, once they are all back.
       const a = await read($, agents)
-      if (!a.helpers.some(h => h.status === 'running')) {
+      if (!a.helpers.some(helper => helper.status === 'running')) {
         if (isArmed(a) && a.helpers.length > 0) await disarmAgents($)
         return
       }
@@ -1877,15 +1877,15 @@ export const register: Register = on => {
       const byId = new Map(list.map(x => [x.id, x.status]))
       const s = await update($, agents, (s): AgentsState => ({
         ...s,
-        helpers: s.helpers.map(h => {
-          if (h.status !== 'running') return h
-          const status = byId.get(h.id)
-          if (status === 'running' || status === 'pending' || status === 'waiting') return h
-          return { ...h, status: status === 'failed' || status === 'killed' ? 'failed' : 'done', endedAt: at }
+        helpers: s.helpers.map(helper => {
+          if (helper.status !== 'running') return helper
+          const status = byId.get(helper.id)
+          if (status === 'running' || status === 'pending' || status === 'waiting') return helper
+          return { ...helper, status: status === 'failed' || status === 'killed' ? 'failed' : 'done', endedAt: at }
         }),
       }))
       // Still running (in the background): the main turn their results start ends it.
-      if (isArmed(s) && s.helpers.length > 0 && !s.helpers.some(h => h.status === 'running')) await disarmAgents($)
+      if (isArmed(s) && s.helpers.length > 0 && !s.helpers.some(helper => helper.status === 'running')) await disarmAgents($)
     })()
     // Stopped (Esc), maybe to rewind: Claude Code may take the strip down and only draw it again on a
     // state change. A few redraws over the next seconds bring it straight back.
@@ -2224,7 +2224,7 @@ export const register: Register = on => {
     const changesOpen = await read($, isChangesOpen)
     const ag = await read($, agents)
     const agentsOpen = ag.isOpen
-    const runningHelpers = ag.helpers.filter(h => h.status === 'running').length
+    const runningHelpers = ag.helpers.filter(helper => helper.status === 'running').length
     const upgradeStage = (await read($, upgrade)).stage
     const upgradeBusy = upgradeStage === 'reading' || upgradeStage === 'rewriting'
     if (demoLevel) ({ g, d, l, c, ctx, n } = demoFixture(demoLevel, at || Date.now(), n))
@@ -2667,9 +2667,9 @@ export const register: Register = on => {
       const chip = (key: string, label: string, isPicked: boolean, onPress: () => void) => (
         <Button key={key} variant={isPicked ? 'primary' : undefined} label={label} onPress={onPress} />
       )
-      const done = ag.helpers.filter(h => h.status === 'done').length
-      const failed = ag.helpers.filter(h => h.status === 'failed').length
-      const taskMax = Math.max(16, Math.min(44, cols - 22, Math.max(...ag.helpers.map(h => h.task.length), 0) + 2))
+      const done = ag.helpers.filter(helper => helper.status === 'done').length
+      const failed = ag.helpers.filter(helper => helper.status === 'failed').length
+      const taskMax = Math.max(16, Math.min(44, cols - 22, Math.max(...ag.helpers.map(helper => helper.task.length), 0) + 2))
       return (
         <Box flexDirection="column">
           {strip}
