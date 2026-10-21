@@ -2560,7 +2560,6 @@ export const register: Register = on => {
         </Box>
       </Box>
     )
-    // Once after a marketplace install: auto-update, answered right here (never through the model).
     // A question in a row under the strip (Ship, resend): its options, the first one primary, and Cancel.
     const ask = demoLevel ? null : await read($, rowAsk)
     if (!n.isOpen && !isMenuOpen && !changesOpen && !agentsOpen && ask) {
