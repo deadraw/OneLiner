@@ -6,6 +6,9 @@
   "author": { "name": "deadraw", "url": "https://github.com/deadraw" },
   "homepage": "https://github.com/deadraw/OneLiner",
   "repository": "https://github.com/deadraw/OneLiner",
+  "documentationUrl": "https://github.com/deadraw/OneLiner#readme",
+  "supportUrl": "https://github.com/deadraw/OneLiner/issues",
+  "privacyPolicyUrl": "https://github.com/deadraw/OneLiner/blob/main/PRIVACY.md",
   "license": "MIT",
   "keywords": ["claude-code", "statusline", "prompt-caching", "rate-limit", "git", "developer-tools"],
   "types": "./types/index.d.ts"
