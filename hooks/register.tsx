@@ -560,7 +560,7 @@ async function prText($: $, base: string): Promise<{ title: string; body: string
 // ── loading the strip, and reloading it while developing ────────
 
 /** For the credit line. Raised with plugin.json and marketplace.json at every release. */
-const VERSION = '1.0.8'
+const VERSION = '1.0.9'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: $, cwd: string, at: number) {
