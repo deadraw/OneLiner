@@ -72,7 +72,7 @@ const now = atom({ plugin: 'oneliner', key: 'now' } as const, 0)
 const brief = atom({ plugin: 'oneliner', key: 'brief' } as const, null)
 const isShipping = atom({ plugin: 'oneliner', key: 'isShipping' } as const, false)
 
-type $ = EngineInterface
+type Engine = EngineInterface
 /** Per project: what a brief needs when you come back (your last asks, how Claude's last answer ended). */
 type Stored = { lastAt: number; prompts: string[]; cacheAt?: number; answerTail?: string; options?: string[] }
 type BriefCache = { forAt: number; goal: string | null; done: string | null; next: string[] }
@@ -118,7 +118,7 @@ function pickOpenItems(markdown: string): string[] {
 }
 
 /** Reads the most recently edited handoff file of the project. */
-async function newestHandoff($: $, cwd: string, files = HANDOFF_FILES): Promise<string | null> {
+async function newestHandoff($: Engine, cwd: string, files = HANDOFF_FILES): Promise<string | null> {
   let newest: { path: string; mtimeMs: number } | null = null
   for (const file of files) {
     const path = `${cwd}/${file}`
@@ -131,7 +131,7 @@ async function newestHandoff($: $, cwd: string, files = HANDOFF_FILES): Promise<
   return newest?.path ?? null
 }
 
-async function readHandoff($: $, cwd: string): Promise<string[]> {
+async function readHandoff($: Engine, cwd: string): Promise<string[]> {
   const path = await newestHandoff($, cwd)
   if (!path) return []
   try { return pickOpenItems(String(await $.fs.read(path))) } catch { return [] }
@@ -159,7 +159,7 @@ function summaryItems(summary: string): string[] {
 const HANDOFF_BACKUP = '.claude/handoff-backup.md'
 
 /** After a handoff: /clear, and optionally start the fresh conversation from the handoff file. */
-async function clearAfterHandoff($: $, name: string, isContinuing: boolean) {
+async function clearAfterHandoff($: Engine, name: string, isContinuing: boolean) {
   await update($, handoffStep, () => null)
   try {
     await $.command.run({ command: 'clear' })
@@ -175,7 +175,7 @@ async function clearAfterHandoff($: $, name: string, isContinuing: boolean) {
 }
 
 /** The draft from the strip's Write button: saved (the previous copy kept), then Clear & continue / Clear is offered. */
-async function saveHandoff($: $, cwd: string) {
+async function saveHandoff($: Engine, cwd: string) {
   const step = await read($, handoffStep)
   if (!step || step.stage !== 'draft') return
   try {
@@ -188,7 +188,7 @@ async function saveHandoff($: $, cwd: string) {
   await update($, handoffStep, (): HandoffStep => ({ stage: 'saved', path: step.path, name: step.name }))
 }
 
-async function writeHandoff($: $, cwd: string) {
+async function writeHandoff($: Engine, cwd: string) {
   if (await read($, isWritingHandoff)) return
   // Your own file (the mod's auto note doesn't count); none yet → a new HANDOFF.md.
   const existing = await newestHandoff($, cwd, HANDOFF_FILES.filter(f => f !== '.claude/handoff.md'))
@@ -240,13 +240,13 @@ function lineDiff(before: string, after: string): { added: number; removed: numb
 
 // ── git ─────────────────────────────────────────────────────────
 
-async function runGit($: $, args: string[], timeoutMs = 15_000) {
+async function runGit($: Engine, args: string[], timeoutMs = 15_000) {
   // GIT_TERMINAL_PROMPT=0: a remote that wants credentials fails fast instead of hanging.
   return $.process.run(['git', ...args], { timeoutMs, env: { GIT_TERMINAL_PROMPT: '0' } })
 }
 
 /** Downloads remote refs only (never touches your files), so "behind" / "diverged" stay true. */
-async function fetchRemote($: $) {
+async function fetchRemote($: Engine) {
   const g = await read($, git)
   if (!g.isRepo || !g.hasUpstream) return
   try {
@@ -256,7 +256,7 @@ async function fetchRemote($: $) {
 }
 
 /** After a fetch: new upstream commits you don't have yet → one popup naming who pushed them. */
-async function noticeRemotePush($: $, branch: string) {
+async function noticeRemotePush($: Engine, branch: string) {
   const up = (await runGit($, ['rev-parse', '@{u}'])).stdout.trim()
   if (!up) return
   const seen = await read($, remoteSeen)
@@ -277,7 +277,7 @@ const GIT_OPERATIONS: [string, string][] = [
 ]
 
 /** Which multi-step git operation is stopped halfway, if any (its marker in the git dir). */
-async function gitOperation($: $): Promise<string | null> {
+async function gitOperation($: Engine): Promise<string | null> {
   const r = await runGit($, ['rev-parse', '--absolute-git-dir'])
   if (r.exitCode !== 0) return null
   const dir = r.stdout.trim()
@@ -287,7 +287,7 @@ async function gitOperation($: $): Promise<string | null> {
   return null
 }
 
-async function refreshGit($: $): Promise<GitState> {
+async function refreshGit($: Engine): Promise<GitState> {
   const next: GitState = { isRepo: false, branch: '', changed: 0, ahead: 0, behind: 0, hasUpstream: false, conflicts: 0, operation: null }
   try {
     // The three git calls run side by side: each one costs a process start (slow on Windows).
@@ -355,7 +355,7 @@ function fileLine(s: FileStat): string {
   return s.kind === 'new' ? `${name} new` : s.kind === 'binary' ? `${name} binary` : `${name} +${s.added} −${s.removed}`
 }
 
-async function commitMessage($: $): Promise<string> {
+async function commitMessage($: Engine): Promise<string> {
   const stat = await runGit($, ['status', '--short'])
   const diff = await runGit($, ['diff', 'HEAD', '--no-color'])
   const fallback = `Update ${stat.stdout.trim().split('\n').length} files`
@@ -377,7 +377,7 @@ async function commitMessage($: $): Promise<string> {
 let answerRowAsk: ((choice: string | null) => void) | null = null
 
 /** Asks in a row under the strip; resolves to the chosen option, or null when dismissed. */
-async function askInRow($: $, text: string, options: string[]): Promise<string | null> {
+async function askInRow($: Engine, text: string, options: string[]): Promise<string | null> {
   answerRowAsk?.(null) // a newer question replaces an unanswered one
   const choice = new Promise<string | null>(resolve => { answerRowAsk = resolve })
   await update($, rowAsk, () => ({ text, options }))
@@ -387,14 +387,14 @@ async function askInRow($: $, text: string, options: string[]): Promise<string |
 }
 
 /** A row button's answer; after a reload nobody waits for it, so the row just closes. */
-async function answerRow($: $, choice: string | null) {
+async function answerRow($: Engine, choice: string | null) {
   const resolve = answerRowAsk
   answerRowAsk = null
   if (resolve) resolve(choice)
   else await update($, rowAsk, () => null)
 }
 
-async function ship($: $) {
+async function ship($: Engine) {
   if (await read($, isShipping)) return
   const g = await refreshGit($)
   if (!g.isRepo) return $.ui.toast('Not a git repository')
@@ -438,7 +438,7 @@ const SHIP_BUILD = true // run the project's build before Ship commits
 const ANDROID_JAVA_HOME = 'C:/Program Files/Android/Android Studio/jbr'
 
 /** Runs the project's build; resolves the first error line, or null when it passed or there is none. */
-async function buildCheck($: $): Promise<string | null> {
+async function buildCheck($: Engine): Promise<string | null> {
   if (!SHIP_BUILD) return null
   const cwd = await $.session.cwd()
   const wrap = (argv: string[]) => (isWindows(cwd) ? ['cmd', '/c', ...argv] : argv)
@@ -468,7 +468,7 @@ const DIFF_MAX_CHARS = 10_000 // what one Code element draws
 const DEFAULT_BRANCHES = new Set(['main', 'master'])
 
 /** Shows one changed file's diff against HEAD in the diff pane: its hunks only, cut at a hunk to fit. */
-async function openDiff($: $, paths: string[], index: number) {
+async function openDiff($: Engine, paths: string[], index: number) {
   const path = paths[index]
   if (!path) return
   const g = await read($, git)
@@ -497,7 +497,7 @@ async function openDiff($: $, paths: string[], index: number) {
 }
 
 /** A pull request for this branch: Create or Draft asked in the strip row, the title and description from Sonnet. */
-async function createPr($: $) {
+async function createPr($: Engine) {
   const g = await refreshGit($)
   if (!g.isRepo || DEFAULT_BRANCHES.has(g.branch)) return $.ui.toast(`A pull request starts from a branch other than ${g.branch || 'main'}`)
   const head = await runGit($, ['rev-parse', '--abbrev-ref', 'origin/HEAD']).catch(() => null)
@@ -537,7 +537,7 @@ async function createPr($: $) {
 }
 
 /** The pull request's title and description, written by Sonnet from the branch's commits and files. */
-async function prText($: $, base: string): Promise<{ title: string; body: string }> {
+async function prText($: Engine, base: string): Promise<{ title: string; body: string }> {
   const [log, stat] = await Promise.all([
     runGit($, ['log', `origin/${base}..HEAD`, '--format=- %s%n%b']),
     runGit($, ['diff', '--stat', `origin/${base}...HEAD`]),
@@ -563,7 +563,7 @@ async function prText($: $, base: string): Promise<{ title: string; body: string
 const VERSION = '1.0.9'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
-function loadReadings($: $, cwd: string, at: number) {
+function loadReadings($: Engine, cwd: string, at: number) {
   void refreshLimit($).then(() => seedCache($, cwd, at))
   void refreshGit($).then(() => fetchRemote($)).then(() => refreshGit($))
   // A dev server that isn't running takes Windows ~2-4 s to refuse, so its probe never holds the rest.
@@ -579,7 +579,7 @@ function loadReadings($: $, cwd: string, at: number) {
  * (Edited code loads by itself with CLAUDE_CODE_PLUGIN_DIR_WATCH=1: each save reloads this plugin alone.)
  * Fresh also forgets the auto-update answer and this project's saved data, so first-run behavior shows again.
  */
-async function reloadStrip($: $, cwd: string, isFresh: boolean) {
+async function reloadStrip($: Engine, cwd: string, isFresh: boolean) {
   await answerRow($, null)
   await Promise.all([
     update($, nextSteps, (s): NextState => ({ ...s, isOpen: false, view: 'main' })),
@@ -648,7 +648,7 @@ function helperClock(h: Helper, at: number): string {
 }
 
 /** Back to Auto and the same model, the helpers' list kept for a look. */
-async function disarmAgents($: $) {
+async function disarmAgents($: Engine) {
   await update($, agents, (a): AgentsState => ({ ...a, cap: null, model: 'same', isCustom: false }))
 }
 
@@ -656,11 +656,11 @@ async function disarmAgents($: $) {
 
 type LaunchConfig = { runtimeExecutable?: string; runtimeArgs?: string[]; port?: number }
 
-async function readJson($: $, path: string): Promise<any> {
+async function readJson($: Engine, path: string): Promise<any> {
   try { return (await $.fs.exists(path)) ? JSON.parse(String(await $.fs.read(path))) : null } catch { return null }
 }
 
-async function detectDev($: $, cwd: string): Promise<{ port: number; argv: string[] } | null> {
+async function detectDev($: Engine, cwd: string): Promise<{ port: number; argv: string[] } | null> {
   const launch = await readJson($, `${cwd}/.claude/launch.json`)
   const cfg: LaunchConfig | undefined = launch?.configurations?.find((c: LaunchConfig) => c.port)
   const wrap = (argv: string[]) => (isWindows(cwd) ? ['cmd', '/c', ...argv] : argv)
@@ -677,7 +677,7 @@ async function detectDev($: $, cwd: string): Promise<{ port: number; argv: strin
 let isProbing = false // one probe at a time
 let devProc: AsyncGenerator<unknown, unknown> | null = null // the server Start launched, while it runs
 
-async function probeDev($: $) {
+async function probeDev($: Engine) {
   const d = await read($, dev)
   if (d.port === null || d.status === 'starting' || isProbing) return
   isProbing = true
@@ -698,7 +698,7 @@ async function probeDev($: $) {
  * Ends whatever listens on the port, with its child processes: the server Start launched, or one
  * started by Claude or in a terminal. `cmd /c npm run dev` alone would leave node running on Windows.
  */
-async function killPort($: $, cwd: string, port: number) {
+async function killPort($: Engine, cwd: string, port: number) {
   try {
     if (isWindows(cwd)) {
       const { stdout } = await $.process.run(['netstat', '-ano'])
@@ -717,7 +717,7 @@ async function killPort($: $, cwd: string, port: number) {
 }
 
 /** ■ on the dev part's hover: the server stops, the strip says so at once. */
-async function stopDev($: $, cwd: string) {
+async function stopDev($: Engine, cwd: string) {
   const d = await read($, dev)
   if (d.port === null) return
   const proc = devProc
@@ -728,7 +728,7 @@ async function stopDev($: $, cwd: string) {
 }
 
 /** ↻ on the dev part's hover: stop, then start again. */
-async function restartDev($: $, cwd: string) {
+async function restartDev($: Engine, cwd: string) {
   await stopDev($, cwd)
   await startDev($, cwd)
 }
@@ -739,7 +739,7 @@ function firstErrorLine(text: string): string {
   return (m?.[1] ?? plain).trim().slice(0, 100) || 'server error'
 }
 
-async function startDev($: $, cwd: string) {
+async function startDev($: Engine, cwd: string) {
   const found = await detectDev($, cwd)
   if (!found) return
   await update($, dev, (cur): DevState => ({ ...cur, status: 'starting', error: null }))
@@ -766,7 +766,7 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const REBUILD_CHECK_MS = 2500
 
 /** After a turn that edited files: tells whether the running dev server rebuilt cleanly. */
-async function reportRebuild($: $) {
+async function reportRebuild($: Engine) {
   const before = await read($, dev)
   if (before.port === null || (before.status !== 'up' && before.status !== 'error')) return
   await probeDev($)
@@ -777,7 +777,7 @@ async function reportRebuild($: $) {
 
 // ── limits + cache ──────────────────────────────────────────────
 
-async function refreshLimit($: $) {
+async function refreshLimit($: Engine) {
   try {
     const usage = await $.session.usage()
     const ctx = usage.context
@@ -873,7 +873,7 @@ function parseResetTime(text: string, at: number): number | null {
   return d.getTime()
 }
 
-async function offerResend($: $, errorText: string, prompt: string) {
+async function offerResend($: Engine, errorText: string, prompt: string) {
   const at = await $.clock.now()
   const l = await read($, limit)
   // A session/weekly limit is account-wide: another model doesn't help, waiting does.
@@ -914,7 +914,7 @@ const costKey = (startedAt: number) => `cost:${startedAt}`
 let costCarry: { key: string; carry: CostCarry } | null = null
 
 /** The conversation's cost: what earlier runs of it cost, plus this run's ledger. */
-async function conversationCost($: $, startedAt: number, usd: number): Promise<number> {
+async function conversationCost($: Engine, startedAt: number, usd: number): Promise<number> {
   const key = costKey(startedAt)
   if (costCarry?.key !== key) {
     const saved = (await $.store.get(key)) as CostCarry | undefined
@@ -933,7 +933,7 @@ type LastLimit = { percent: number; resetsAt: string | null; weekPercent: number
 const WINDOW_MS = 5 * 60 * 60_000
 type History = { resetsAt: string | null; points: { at: number; pct: number }[] }
 
-async function recordHistory($: $, resetsAt: string | null, pct: number, at: number) {
+async function recordHistory($: Engine, resetsAt: string | null, pct: number, at: number) {
   try {
     const saved = ((await $.store.get(HISTORY_KEY)) as History | undefined) ?? { resetsAt, points: [] }
     const points = saved.resetsAt === resetsAt ? saved.points : []
@@ -997,7 +997,7 @@ function compactSeg<T extends { text: string }>(s: T): T {
     .replace(/ · /g, ' ')
     .replace(/ full ~/, ' →')
     .replace(/^cache /, '⏱')
-    .replace(/^(ctx \d+%) \d+k$/, '$1')
+    .replace(/^(ctx \d+%) \d+k$/, (_m, head: string) => head)
   return { ...s, text }
 }
 
@@ -1006,7 +1006,7 @@ function secsLeftExact(c: CacheState, ttl: number, at: number): number | null {
 }
 
 /** A setting change emptied the conversation cache: the next message re-sends everything. */
-async function markCacheReset($: $, reason: string) {
+async function markCacheReset($: Engine, reason: string) {
   const c = await read($, cache)
   if (c.lastTurnAt === null) return // nothing cached yet
   await update($, cache, x => ({ ...x, resetReason: reason }))
@@ -1017,7 +1017,7 @@ async function markCacheReset($: $, reason: string) {
 
 const ttlMinutes = (ttl: '5m' | '1h') => (ttl === '5m' ? 5 : 60)
 
-async function seedCache($: $, cwd: string, at: number) {
+async function seedCache($: Engine, cwd: string, at: number) {
   const c0 = await read($, cache)
   if (c0.lastTurnAt !== null) return // kept across a hot reload, or set by classic.SessionStart
   const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
@@ -1111,12 +1111,12 @@ const STRIP_PARTS: { id: string; label: string; words: string[] }[] = [
 ]
 const HIDDEN_KEY = 'strip:hidden' // one $.store value: the same for every project and session
 
-async function setHidden($: $, list: string[]) {
+async function setHidden($: Engine, list: string[]) {
   await update($, hidden, () => list)
   await $.store.set(HIDDEN_KEY, list)
 }
 
-async function toggleHidden($: $, id: string): Promise<boolean> {
+async function toggleHidden($: Engine, id: string): Promise<boolean> {
   const cur = await read($, hidden)
   const isNowHidden = !cur.includes(id)
   await setHidden($, isNowHidden ? [...cur, id] : cur.filter(x => x !== id))
@@ -1255,7 +1255,7 @@ function suggestVia(c: CacheState, l: LimitState, at: number): 'cache' | 'smart'
 const shortModel = (id: string | null) =>
   id ? id.replace(/^claude-/, '').replace(/-\d{8}$/, '') : 'session model'
 
-async function suggestWithModel($: $, cwd: string) {
+async function suggestWithModel($: Engine, cwd: string) {
   const [n, c, l] = await Promise.all([read($, nextSteps), read($, cache), read($, limit)])
   if (n.aiStatus !== 'idle') return // once per turn
   if (await read($, demo)) return // demo mode never spends tokens
@@ -1315,7 +1315,7 @@ const dayKey = (d: Date) => `${String(d.getMonth() + 1).padStart(2, '0')}-${Stri
 const localNoon = (at: number) => { const d = new Date(at); d.setHours(12, 0, 0, 0); return d }
 
 /** Adds one turn to today's record: a typed task's count, time, cost and tokens; a helper's tokens and cost alone. */
-async function recordReport($: $, add: Partial<ReportDay> & { model?: string; project?: string; session?: number }) {
+async function recordReport($: Engine, add: Partial<ReportDay> & { model?: string; project?: string; session?: number }) {
   try {
     const now = new Date(await $.clock.now())
     const key = reportKey(now.getFullYear())
@@ -1355,7 +1355,7 @@ function turnTokens(u: { input_tokens: number; output_tokens: number; cache_read
 }
 
 /** The days of a tab, oldest first, each with its local date. */
-async function reportDays($: $, tab: 'today' | 'week' | 'month' | 'year', at: number): Promise<{ date: Date; day: ReportDay | null }[]> {
+async function reportDays($: Engine, tab: 'today' | 'week' | 'month' | 'year', at: number): Promise<{ date: Date; day: ReportDay | null }[]> {
   const today = localNoon(at)
   const count = tab === 'today' ? 1 : tab === 'week' ? 7 : tab === 'month' ? 30
     : Math.round((today.getTime() - new Date(today.getFullYear(), 0, 1, 12).getTime()) / 86_400_000) + 1
@@ -1375,11 +1375,13 @@ function reportStreak(days: { day: ReportDay | null }[]): number {
 }
 
 const hoursShort = (ms: number) => (ms >= 3_600_000 ? `${+(ms / 3_600_000).toFixed(1)} h` : ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`)
-const usdShort = (usd: number) => (usd >= 1000 ? `$${Math.round(usd).toLocaleString('en-US')}` : `$${usd.toFixed(2)}`)
+/** The dollar sign, escaped: the plugin directory reads a bare dollar sign in the code as the capability object. */
+const USD = '\u0024'
+const usdShort = (usd: number) => (usd >= 1000 ? `${USD}${Math.round(usd).toLocaleString('en-US')}` : `${USD}${usd.toFixed(2)}`)
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-async function openReport($: $) {
+async function openReport($: Engine) {
   await update($, nextSteps, (s): NextState => ({ ...s, isOpen: false }))
   await $.ui.open({ id: REPORT_PANE, title: 'Report', closeOnEscape: true }).catch(() => {})
 }
@@ -1413,7 +1415,7 @@ const UPGRADE_REWRITE = [
 ].join('\n')
 
 /** A short digest of the work for Claude Sonnet when the conversation's cache is cold. */
-async function conversationDigest($: $, cwd: string): Promise<string> {
+async function conversationDigest($: Engine, cwd: string): Promise<string> {
   const [stored, n] = await Promise.all([$.store.get(storeKey(cwd)) as Promise<Stored | undefined>, read($, nextSteps)])
   let status = ''
   try { status = (await runGit($, ['status', '--short'])).stdout.split('\n').slice(0, 30).join('\n') } catch {}
@@ -1421,7 +1423,7 @@ async function conversationDigest($: $, cwd: string): Promise<string> {
 }
 
 /** One question to the model: the conversation's own over its cache when that's cheap, else Sonnet on a digest. */
-async function askUpgradeModel($: $, cwd: string, ask: string): Promise<{ text: string | null; via: string }> {
+async function askUpgradeModel($: Engine, cwd: string, ask: string): Promise<{ text: string | null; via: string }> {
   const [c, l, at, model] = await Promise.all([read($, cache), read($, limit), $.clock.now(), $.session.model().catch(() => '')])
   if (suggestVia(c, l, at) === 'cache') {
     const r = await $.model.fork({ prompt: ask }).catch(() => null)
@@ -1456,7 +1458,7 @@ function parseRewrite(text: string): { rewrite: string; added: string[] } | null
 const wordCount = (text: string) => (text.trim() ? text.trim().split(/\s+/).length : 0)
 
 /** ⇡: the prompt box's text goes to the upgrade pane; questions first. */
-async function startUpgrade($: $, cwd: string) {
+async function startUpgrade($: Engine, cwd: string) {
   const box = await $.prompt.read().catch(() => ({ text: '' }))
   const original = box.text.trim()
   if (!original) {
@@ -1482,14 +1484,14 @@ async function startUpgrade($: $, cwd: string) {
 }
 
 /** One answer ('' skips); the last one answered starts the rewrite. */
-async function answerUpgrade($: $, cwd: string, index: number, answer: string) {
+async function answerUpgrade($: Engine, cwd: string, index: number, answer: string) {
   const u = await update($, upgrade, (cur): UpgradeState => ({
     ...cur, questions: cur.questions.map((q, i) => (i === index ? { ...q, answer, isTyping: false } : q)),
   }))
   if (u.stage === 'questions' && u.questions.every(q => q.answer !== null)) await rewriteUpgrade($, cwd)
 }
 
-async function rewriteUpgrade($: $, cwd: string) {
+async function rewriteUpgrade($: Engine, cwd: string) {
   const run = upgradeRun
   const u = await update($, upgrade, (cur): UpgradeState => ({ ...cur, stage: 'rewriting', error: null }))
   const answers = u.questions
@@ -1506,14 +1508,14 @@ async function rewriteUpgrade($: $, cwd: string) {
 }
 
 /** Use it: the rewrite replaces the draft in the prompt box, not sent. */
-async function useUpgrade($: $) {
+async function useUpgrade($: Engine) {
   const u = await read($, upgrade)
   if (u.rewrite) await $.prompt.fill({ text: u.rewrite, mode: 'replace' })
   await closeUpgrade($)
 }
 
 /** Cancel / Close: the pane goes, the prompt box keeps what you typed. */
-async function closeUpgrade($: $) {
+async function closeUpgrade($: Engine) {
   upgradeRun += 1
   await update($, upgrade, () => UPGRADE_IDLE)
   await $.ui.close({ id: UPGRADE_PANE }).catch(() => {})
@@ -1522,7 +1524,7 @@ async function closeUpgrade($: $) {
 // ── brief ───────────────────────────────────────────────────────
 
 /** Everything a brief or a handoff note is written from: your handoff file, your last asks, Claude's last answer, git. */
-async function briefMaterial($: $, cwd: string, stored: Stored | undefined): Promise<string> {
+async function briefMaterial($: Engine, cwd: string, stored: Stored | undefined): Promise<string> {
   const parts: string[] = []
   const handoff = await newestHandoff($, cwd)
   if (handoff) {
@@ -1575,7 +1577,7 @@ function noteSections(markdown: string): BriefCache | null {
 }
 
 /** The free part of the brief, shown at once; fillBrief adds Goal / Done / Next. Null when there is nothing to say. */
-async function buildBrief($: $, cwd: string, stored: Stored | undefined, at: number): Promise<Brief | null> {
+async function buildBrief($: Engine, cwd: string, stored: Stored | undefined, at: number): Promise<Brief | null> {
   const g = await refreshGit($)
   let commits: string[] = []
   try {
@@ -1602,7 +1604,7 @@ async function buildBrief($: $, cwd: string, stored: Stored | undefined, at: num
  * Goal / Done / Next, cheapest first: a handoff note written after your last message (free),
  * a summary already made for the same point (free), else one SMART_MODEL call.
  */
-async function fillBrief($: $, cwd: string, stored: Stored | undefined) {
+async function fillBrief($: Engine, cwd: string, stored: Stored | undefined) {
   const forAt = stored?.lastAt ?? 0
   let found: BriefCache | null = null
   try {
@@ -1634,13 +1636,13 @@ async function fillBrief($: $, cwd: string, stored: Stored | undefined) {
   await update($, brief, b => b && { ...b, goal: found?.goal ?? null, done: found?.done ?? null, next, status })
 }
 
-async function showBrief($: $, b: Brief) {
+async function showBrief($: Engine, b: Brief) {
   await update($, brief, () => b)
   await $.ui.open({ id: BRIEF_PANE, title: 'Where you left off' })
 }
 
 /** Builds, shows and fills the brief; nothing opens when there is nothing to say. */
-async function openBrief($: $, cwd: string, stored: Stored | undefined, at: number, awayHours?: number) {
+async function openBrief($: Engine, cwd: string, stored: Stored | undefined, at: number, awayHours?: number) {
   const b = await buildBrief($, cwd, stored, at)
   if (!b) return false
   await showBrief($, awayHours === undefined ? b : { ...b, awayHours })
@@ -1656,7 +1658,7 @@ const NOTE_PROMPT = 'Write a handoff note so this work can continue after the co
  * Before compacting: a handoff note while the full transcript is still there (a fork over the cache).
  * Right after a resume there is nothing to fork yet: SMART_MODEL writes it from the same material as the brief.
  */
-async function writeCompactNote($: $, cwd: string): Promise<boolean> {
+async function writeCompactNote($: Engine, cwd: string): Promise<boolean> {
   if (!cwd) return false
   let text = ''
   const r = await $.model.fork({ prompt: NOTE_PROMPT })
@@ -1680,7 +1682,7 @@ async function writeCompactNote($: $, cwd: string): Promise<boolean> {
 }
 
 /** After compacting: the cache starts cold, and the brief shows Goal / Done / Next from the fresh note (no extra call). */
-async function afterCompact($: $, cwd: string, messages: readonly { text: string }[], hasNote: boolean) {
+async function afterCompact($: Engine, cwd: string, messages: readonly { text: string }[], hasNote: boolean) {
   await update($, cache, c => ({ ...c, lastTurnAt: null, readPercent: null }))
   void refreshLimit($)
   if (!cwd) return
@@ -1694,7 +1696,7 @@ async function afterCompact($: $, cwd: string, messages: readonly { text: string
 }
 
 /** The Compact button: runs /compact exactly as if typed, so Claude Code shows its own progress. */
-async function compactNow($: $) {
+async function compactNow($: Engine) {
   try {
     await $.command.run({ command: 'compact' })
   } catch {
@@ -2020,7 +2022,7 @@ export const register: Register = on => {
   on('classic.PreModelSwitch', async ($, e, next) => {
     await update($, cache, c => ({ ...c, reportedTtl: ttlMinutes(e.cache_ttl) }))
     if (e.prompt_cache_warm && e.context_tokens > 20_000) {
-      $.ui.toast(`Switching to ${e.to_model} drops the warm cache: ${tokensShort(e.context_tokens)} tokens re-cached (~$${e.estimated_cache_write_usd.toFixed(2)})`, { timeoutMs: 8000 })
+      $.ui.toast(`Switching to ${e.to_model} drops the warm cache: ${tokensShort(e.context_tokens)} tokens re-cached (~${USD}${e.estimated_cache_write_usd.toFixed(2)})`, { timeoutMs: 8000 })
     }
     return next(e)
   })
@@ -2350,7 +2352,7 @@ export const register: Register = on => {
           l.resetsAt ? `resets ${hhmm(l.resetsAt)}` : '',
           fullAt !== null ? `full ~${hhmmAt(fullAt)}` : '',
           l.weekPercent !== null ? `7d ${Math.round(l.weekPercent)}%` : '',
-          ctx.usd ? `$${ctx.usd.toFixed(2)}` : '',
+          ctx.usd ? `${USD}${ctx.usd.toFixed(2)}` : '',
         ].filter(Boolean).join(' · '),
       })
     }

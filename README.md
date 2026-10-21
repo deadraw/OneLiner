@@ -274,7 +274,7 @@ No telemetry and no services of its own: nothing leaves your machine except thro
 | handoff files in your project (with a backup of the previous one), and `.claude/handoff.md` before a compaction | when you ask, and before a compaction |
 | the work report's daily totals, the conversation cost and the last limit reading, in Claude Code's local mod store | after each turn |
 
-It never changes your permission settings, never writes Claude Code's settings files and never reads credentials.
+It never changes your permission settings, never writes Claude Code's settings files and never reads credentials. `git fetch`, `git push` and `gh` sign in the way you already set them up (your git credential helper, `gh auth`); OneLiner doesn't see those logins, and they only reach your own repository's remote.
 
 ### What it does inside Claude Code
 
