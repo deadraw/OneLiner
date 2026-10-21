@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentsState, Brief, HandoffStep, CacheState, ContextState, DevState, DiffView, FileStat, GitState, Helper, LimitState, NextState } from '../types'
+import type { AgentsState, ReportDay, UpgradeQuestion, UpgradeState, Brief, HandoffStep, CacheState, ContextState, DevState, DiffView, FileStat, GitState, Helper, LimitState, NextState } from '../types'
 
 const CACHE_TTL_MIN = 60 // subscription default
 const CACHE_TTL_OVERAGE_MIN = 5 // extra usage / reported 5m
@@ -29,6 +29,8 @@ const TICK_MS = 60_000 // cache + limit countdowns, limit %, dev probe; git ever
 const BRIEF_PANE = 'oneliner-brief'
 const LIMITS_PANE = 'oneliner-limits'
 const DIFF_PANE = 'oneliner-diff'
+const UPGRADE_PANE = 'oneliner-upgrade'
+const REPORT_PANE = 'oneliner-report'
 const SMART_MODEL = 'claude-sonnet-5-5' // the brief, the handoff note, commit and PR texts, ideas off the cache (effort low)
 // "✦ 3 more ideas" leaves the cached conversation for SMART_MODEL when the 5h limit is this full,
 // or the cache has less than this share of its lifetime left (or is cold).
@@ -62,6 +64,9 @@ const hidden = atom({ plugin: 'oneliner', key: 'hidden' } as const, [] as string
 const stripMenu = atom({ plugin: 'oneliner', key: 'isStripMenuOpen' } as const, false)
 const isChangesOpen = atom({ plugin: 'oneliner', key: 'isChangesOpen' } as const, false)
 const diffView = atom({ plugin: 'oneliner', key: 'diffView' } as const, null as DiffView | null)
+const reportTab = atom({ plugin: 'oneliner', key: 'reportTab' } as const, 'week' as 'today' | 'week' | 'month' | 'year')
+const UPGRADE_IDLE: UpgradeState = { stage: 'idle', original: '', questions: [], rewrite: '', added: [], via: null, error: null }
+const upgrade = atom({ plugin: 'oneliner', key: 'upgrade' } as const, UPGRADE_IDLE)
 const AGENTS_IDLE: AgentsState = { cap: null, model: 'same', isCustom: false, isOpen: false, helpers: [] }
 const agents = atom({ plugin: 'oneliner', key: 'agents' } as const, AGENTS_IDLE)
 const now = atom({ plugin: 'oneliner', key: 'now' } as const, 0)
@@ -342,7 +347,7 @@ async function refreshGit($: $): Promise<GitState> {
 
 /** A path's last part: "hooks/register.tsx" → "register.tsx" (a folder keeps its name). */
 function baseName(path: string): string {
-  return path.replace(/\/$/, '').split('/').pop() ?? path
+  return path.replace(/[\\/]$/, '').split(/[\\/]/).pop() ?? path
 }
 
 /** "register.tsx +12 −3", "logo.png new", "font.woff binary". */
@@ -781,7 +786,15 @@ async function refreshLimit($: $) {
   try {
     const usage = await $.session.usage()
     const ctx = usage.context
-    await update($, context, () => ({ percent: ctx.percent ?? null, tokens: ctx.tokens ?? null, window: ctx.window, usd: usage.cost?.usd ?? null }))
+    // Context first, on its own: the saved-cost lookup must never hold it back (or drop it when it fails).
+    const percent = ctx.percent ?? (ctx.tokens != null && ctx.window ? (ctx.tokens / ctx.window) * 100 : null)
+    await update($, context, c => ({ percent, tokens: ctx.tokens ?? null, window: ctx.window, usd: c.usd ?? usage.cost?.usd ?? null }))
+    if (usage.cost) {
+      const cost = usage.cost
+      void conversationCost($, usage.startedAt, cost.usd)
+        .then(usd => update($, context, c => (c.usd === usd ? c : { ...c, usd })))
+        .catch(() => {})
+    }
     const five = usage.rateLimits.find(r => r.kind === 'five_hour') ?? usage.rateLimits[0]
     if (!five) {
       // No limits until this session's first request (an old session just opened, or right after a reload):
@@ -899,14 +912,36 @@ async function offerResend($: $, errorText: string, prompt: string) {
 const HISTORY_KEY = 'limit:history' // one per account: every session adds to the same window
 // The last 5h / 7d reading, one per account: a session shows it before its own first request reports one.
 const LAST_LIMIT_KEY = 'limit:last'
+// A conversation's cost so far, across restarts: Claude Code's own ledger (what /cost shows) starts from 0
+// each time the session's process starts, a resume included. Keyed by the conversation's first launch.
+type CostCarry = { carried: number; lastSeen: number }
+const costKey = (startedAt: number) => `cost:${startedAt}`
+let costCarry: { key: string; carry: CostCarry } | null = null
+
+/** The conversation's cost: what earlier runs of it cost, plus this run's ledger. */
+async function conversationCost($: $, startedAt: number, usd: number): Promise<number> {
+  const key = costKey(startedAt)
+  if (costCarry?.key !== key) {
+    const saved = (await $.store.get(key)) as CostCarry | undefined
+    costCarry = { key, carry: saved ?? { carried: 0, lastSeen: 0 } }
+  }
+  const c = costCarry.carry
+  // The ledger went down: a new run of the same conversation. What the last run reached is kept.
+  const next: CostCarry = usd + 0.000_001 < c.lastSeen ? { carried: c.carried + c.lastSeen, lastSeen: usd } : { carried: c.carried, lastSeen: usd }
+  if (next.carried !== c.carried || Math.abs(next.lastSeen - c.lastSeen) >= 0.005) {
+    costCarry = { key, carry: next }
+    void $.store.set(key, next)
+  }
+  return next.carried + usd
+}
 type LastLimit = { percent: number; resetsAt: string | null; weekPercent: number | null; weekResetsAt: string | null; at: number }
 const WINDOW_MS = 5 * 60 * 60_000
 type History = { resetsAt: string | null; points: { at: number; pct: number }[] }
 
 async function recordHistory($: $, resetsAt: string | null, pct: number, at: number) {
   try {
-    const h = ((await $.store.get(HISTORY_KEY)) as History | undefined) ?? { resetsAt, points: [] }
-    const points = h.resetsAt === resetsAt ? h.points : []
+    const saved = ((await $.store.get(HISTORY_KEY)) as History | undefined) ?? { resetsAt, points: [] }
+    const points = saved.resetsAt === resetsAt ? saved.points : []
     const last = points[points.length - 1]
     if (last && last.pct === pct && at - last.at < 5 * 60_000) return // unchanged: one point per 5 min is plenty
     await $.store.set(HISTORY_KEY, { resetsAt, points: [...points, { at, pct }].slice(-400) })
@@ -1075,6 +1110,7 @@ const STRIP_PARTS: { id: string; label: string; words: string[] }[] = [
   { id: 'limit', label: '5h limit', words: ['limit', '5h', 'limits'] },
   { id: 'context', label: 'context', words: ['context', 'ctx'] },
   { id: 'cache', label: 'cache', words: ['cache', 'clock'] },
+  { id: 'upgrade', label: 'upgrade', words: ['upgrade', 'better'] },
   { id: 'agents', label: 'agents', words: ['agents', 'helpers'] },
   { id: 'next', label: 'next', words: ['next', 'ideas', 'suggestions'] },
 ]
@@ -1269,6 +1305,223 @@ async function suggestWithModel($: $, cwd: string) {
     aiVia: via,
     aiStatus: g.ideas.length ? 'done' : 'error',
   }))
+}
+
+// ── work report ─────────────────────────────────────────────────
+
+const REPORT_GOLD = '#F2C46D'
+const REPORT_COLORS = ['#EE9D5B', '#6a6ae4', '#4fb38a', '#F7D35C', '#e34a9e', '#5bb6ee']
+const reportKey = (year: number) => `report:${year}`
+const EMPTY_DAY: ReportDay = { tasks: 0, aiMs: 0, usd: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, weighted: 0, sessions: [], models: {}, projects: {} }
+type ReportYear = Record<string, ReportDay> // 'MM-DD' → the day
+
+/** A local date as the report keys it, and its year. Days step at local noon, so a clock change can't skip one. */
+const dayKey = (d: Date) => `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+const localNoon = (at: number) => { const d = new Date(at); d.setHours(12, 0, 0, 0); return d }
+
+/** Adds one turn to today's record: a typed task's count, time, cost and tokens; a helper's tokens and cost alone. */
+async function recordReport($: $, add: Partial<ReportDay> & { model?: string; project?: string; session?: number }) {
+  try {
+    const now = new Date(await $.clock.now())
+    const key = reportKey(now.getFullYear())
+    const year = ((await $.store.get(key)) as ReportYear | undefined) ?? {}
+    const day = year[dayKey(now)] ?? EMPTY_DAY
+    const models = { ...day.models }
+    if (add.model && (add.tasks || add.usd)) {
+      const m = models[add.model] ?? { tasks: 0, usd: 0 }
+      models[add.model] = { tasks: m.tasks + (add.tasks ?? 0), usd: m.usd + (add.usd ?? 0) }
+    }
+    const projects = { ...day.projects }
+    if (add.project && add.tasks) projects[add.project] = (projects[add.project] ?? 0) + add.tasks
+    const next: ReportDay = {
+      tasks: day.tasks + (add.tasks ?? 0),
+      aiMs: day.aiMs + (add.aiMs ?? 0),
+      usd: day.usd + (add.usd ?? 0),
+      input: day.input + (add.input ?? 0),
+      output: day.output + (add.output ?? 0),
+      cacheRead: day.cacheRead + (add.cacheRead ?? 0),
+      cacheWrite: day.cacheWrite + (add.cacheWrite ?? 0),
+      weighted: day.weighted + (add.weighted ?? 0),
+      sessions: add.session !== undefined && !day.sessions.includes(add.session) ? [...day.sessions, add.session] : day.sessions,
+      models,
+      projects,
+    }
+    await $.store.set(key, { ...year, [dayKey(now)]: next })
+  } catch {}
+}
+
+/** A turn's tokens, and the same weighted by their API price ratios (for what the cache saved). */
+function turnTokens(u: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }, ttlMin: number) {
+  const writeRatio = ttlMin >= 60 ? 2 : 1.25 // a 1-hour cache write costs 2x input, a 5-minute one 1.25x
+  return {
+    input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens,
+    weighted: u.input_tokens + 5 * u.output_tokens + writeRatio * u.cache_creation_input_tokens + 0.1 * u.cache_read_input_tokens,
+  }
+}
+
+/** The days of a tab, oldest first, each with its local date. */
+async function reportDays($: $, tab: 'today' | 'week' | 'month' | 'year', at: number): Promise<{ date: Date; day: ReportDay | null }[]> {
+  const today = localNoon(at)
+  const count = tab === 'today' ? 1 : tab === 'week' ? 7 : tab === 'month' ? 30
+    : Math.round((today.getTime() - new Date(today.getFullYear(), 0, 1, 12).getTime()) / 86_400_000) + 1
+  const dates = Array.from({ length: count }, (_, i) => { const d = new Date(today); d.setDate(d.getDate() - (count - 1 - i)); return d })
+  const years = [...new Set(dates.map(d => d.getFullYear()))]
+  const stored = new Map(await Promise.all(years.map(async y => [y, ((await $.store.get(reportKey(y))) as ReportYear | undefined) ?? {}] as const)))
+  return dates.map(date => ({ date, day: stored.get(date.getFullYear())?.[dayKey(date)] ?? null }))
+}
+
+/** Days in a row with work, ending today (or yesterday, before today's first task). */
+function reportStreak(days: { day: ReportDay | null }[]): number {
+  let i = days.length - 1
+  if (i >= 0 && !days[i]!.day?.tasks) i -= 1
+  let streak = 0
+  for (; i >= 0 && days[i]!.day?.tasks; i--) streak += 1
+  return streak
+}
+
+const hoursShort = (ms: number) => (ms >= 3_600_000 ? `${+(ms / 3_600_000).toFixed(1)} h` : ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`)
+const usdShort = (usd: number) => (usd >= 1000 ? `$${Math.round(usd).toLocaleString('en-US')}` : `$${usd.toFixed(2)}`)
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+async function openReport($: $) {
+  await update($, nextSteps, (s): NextState => ({ ...s, isOpen: false }))
+  await $.ui.open({ id: REPORT_PANE, title: 'Report', closeOnEscape: true }).catch(() => {})
+}
+
+// ── prompt upgrade (⇡) ──────────────────────────────────────────
+
+const UPGRADE_GOLD = '#F2C46D'
+let upgradeRun = 0 // each ⇡ press; an answer that comes back for an older one is dropped
+
+const UPGRADE_QUESTIONS = [
+  'The user typed the rough prompt below and wants it made better before sending it to you.',
+  'Ask at most 3 multiple-choice questions whose answers would improve the result the most.',
+  'Ask only what you cannot already tell from this conversation and project. Each question gets 2 to 4',
+  'short options (6 words at most each). If no question would help, reply with the single word NONE.',
+  'Reply with exactly these lines and nothing else:',
+  'Q <question>',
+  'O <option>   (2 to 4 lines after each Q)',
+].join('\n')
+
+const UPGRADE_REWRITE = [
+  'Rewrite the user\'s rough prompt below into a better prompt for you, their coding agent.',
+  'Rules: keep exactly what they meant. Add a clear goal, who or what it is for, the format of the result,',
+  'and what done looks like. Use their answers below; leave out what they skipped. Never invent facts,',
+  'names, numbers or prices: where something is unknown, write a [placeholder] in square brackets. Write it',
+  'as one request they could have typed themselves, in plain language, in their language.',
+  'Reply with exactly this and nothing else:',
+  'PROMPT',
+  '<the rewritten prompt, any number of lines>',
+  'ADDED',
+  '- <what you added, a few words>   (2 to 6 lines)',
+].join('\n')
+
+/** A short digest of the work for Claude Sonnet when the conversation's cache is cold. */
+async function conversationDigest($: $, cwd: string): Promise<string> {
+  const [stored, n] = await Promise.all([$.store.get(storeKey(cwd)) as Promise<Stored | undefined>, read($, nextSteps)])
+  let status = ''
+  try { status = (await runGit($, ['status', '--short'])).stdout.split('\n').slice(0, 30).join('\n') } catch {}
+  return `The developer's recent requests:\n${(stored?.prompts ?? []).map(p => `- ${p}`).join('\n') || '(none)'}\n\nEnd of the agent's last answer:\n${n.answerTail || '(none)'}\n\nUncommitted files:\n${status || '(none)'}`
+}
+
+/** One question to the model: the conversation's own over its cache when that's cheap, else Sonnet on a digest. */
+async function askUpgradeModel($: $, cwd: string, ask: string): Promise<{ text: string | null; via: string }> {
+  const [c, l, at, model] = await Promise.all([read($, cache), read($, limit), $.clock.now(), $.session.model().catch(() => '')])
+  if (suggestVia(c, l, at) === 'cache') {
+    const r = await $.model.fork({ prompt: ask }).catch(() => null)
+    if (r?.isAnswered) return { text: r.text, via: `${shortModel(model || null)} · from cache` }
+  }
+  const r = await $.model.complete({
+    model: SMART_MODEL, effort: 'low', maxTokens: 3000, timeoutMs: 45_000,
+    system: 'You help a developer turn a rough request into a clear prompt for their coding agent.',
+    prompt: `${ask}\n\n${await conversationDigest($, cwd)}`,
+  }).catch(() => null)
+  return { text: r?.isAnswered ? r.text : null, via: `${shortModel(SMART_MODEL)} · ~3k` }
+}
+
+function parseQuestions(text: string): UpgradeQuestion[] {
+  const out: UpgradeQuestion[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (/^Q\s+/.test(line)) out.push({ text: line.replace(/^Q\s+/, '').trim(), options: [], answer: null, isTyping: false })
+    else if (/^O\s+/.test(line) && out.length) out[out.length - 1]!.options.push(line.replace(/^O\s+/, '').trim().slice(0, 48))
+  }
+  return out.filter(q => q.text && q.options.length >= 2).slice(0, 3).map(q => ({ ...q, options: q.options.slice(0, 4) }))
+}
+
+function parseRewrite(text: string): { rewrite: string; added: string[] } | null {
+  const m = /PROMPT\s*\n([\s\S]*?)\n\s*ADDED\s*\n([\s\S]*)$/.exec(text.trim())
+  const rewrite = (m ? m[1]! : text.replace(/^\s*PROMPT\s*\n/, '')).trim()
+  if (!rewrite) return null
+  const added = m ? m[2]!.split('\n').map(x => x.replace(/^\s*[-*•]\s*/, '').trim()).filter(Boolean).slice(0, 6) : []
+  return { rewrite, added }
+}
+
+const wordCount = (text: string) => (text.trim() ? text.trim().split(/\s+/).length : 0)
+
+/** ⇡: the prompt box's text goes to the upgrade pane; questions first. */
+async function startUpgrade($: $, cwd: string) {
+  const box = await $.prompt.read().catch(() => ({ text: '' }))
+  const original = box.text.trim()
+  if (!original) {
+    $.ui.toast('Type a prompt first, then press ⇡')
+    return
+  }
+  const run = ++upgradeRun
+  await update($, upgrade, (): UpgradeState => ({ ...UPGRADE_IDLE, stage: 'reading', original }))
+  void $.ui.open({ id: UPGRADE_PANE, title: 'Upgrade', closeOnEscape: true }).catch(() => {})
+  const { text, via } = await askUpgradeModel($, cwd, `${UPGRADE_QUESTIONS}\n\nThe rough prompt:\n${original}`)
+  if (run !== upgradeRun) return
+  if (text === null) {
+    await update($, upgrade, (u): UpgradeState => ({ ...u, stage: 'error', via, error: 'The questions could not be written.' }))
+    return
+  }
+  const questions = /^\s*NONE\s*$/i.test(text) ? [] : parseQuestions(text)
+  if (questions.length === 0) {
+    await update($, upgrade, (u): UpgradeState => ({ ...u, via }))
+    await rewriteUpgrade($, cwd)
+    return
+  }
+  await update($, upgrade, (u): UpgradeState => ({ ...u, stage: 'questions', questions, via }))
+}
+
+/** One answer ('' skips); the last one answered starts the rewrite. */
+async function answerUpgrade($: $, cwd: string, index: number, answer: string) {
+  const u = await update($, upgrade, (cur): UpgradeState => ({
+    ...cur, questions: cur.questions.map((q, i) => (i === index ? { ...q, answer, isTyping: false } : q)),
+  }))
+  if (u.stage === 'questions' && u.questions.every(q => q.answer !== null)) await rewriteUpgrade($, cwd)
+}
+
+async function rewriteUpgrade($: $, cwd: string) {
+  const run = upgradeRun
+  const u = await update($, upgrade, (cur): UpgradeState => ({ ...cur, stage: 'rewriting', error: null }))
+  const answers = u.questions
+    .filter(q => q.answer)
+    .map(q => `- ${q.text} ${q.answer}`)
+    .join('\n')
+  const ask = `${UPGRADE_REWRITE}\n\nThe rough prompt:\n${u.original}${answers ? `\n\nTheir answers:\n${answers}` : ''}`
+  const { text, via } = await askUpgradeModel($, cwd, ask)
+  if (run !== upgradeRun) return
+  const parsed = text ? parseRewrite(text) : null
+  await update($, upgrade, (cur): UpgradeState => (parsed
+    ? { ...cur, stage: 'review', rewrite: parsed.rewrite, added: parsed.added, via }
+    : { ...cur, stage: 'error', via, error: 'The rewrite could not be written.' }))
+}
+
+/** Use it: the rewrite replaces the draft in the prompt box, not sent. */
+async function useUpgrade($: $) {
+  const u = await read($, upgrade)
+  if (u.rewrite) await $.prompt.fill({ text: u.rewrite, mode: 'replace' })
+  await closeUpgrade($)
+}
+
+/** Cancel / Close: the pane goes, the prompt box keeps what you typed. */
+async function closeUpgrade($: $) {
+  upgradeRun += 1
+  await update($, upgrade, () => UPGRADE_IDLE)
+  await $.ui.close({ id: UPGRADE_PANE }).catch(() => {})
 }
 
 // ── auto-update (marketplace installs) ──────────────────────────
@@ -1521,6 +1774,8 @@ export const register: Register = on => {
   let demoTimer: { cancel: () => void } | null = null // /strip demo play
   let spawnedThisTask = 0 // helpers started since your last prompt, counted before each one starts (parallel calls race)
   let sessionModel = '' // the model you are on: what Fast & cheap steps down from
+  let isTaskTurn = false // the running main turn answers a prompt you typed (a task for the report)
+  let reportedCost: number | null = null // the conversation's cost when the report last counted it
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
@@ -1532,6 +1787,7 @@ export const register: Register = on => {
         $.command.register({ name: 'brief', description: 'Show where you left off in this project' }),
         $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' }),
         $.command.register({ name: 'limits', description: 'Show today\'s 5h limit usage and forecast' }),
+        $.command.register({ name: 'report', description: 'What Claude did for you: time, sessions and the API price, by day, week, month and year' }),
         $.command.register({
           name: 'strip',
           description: 'Turn strip parts on or off (all projects)',
@@ -1547,7 +1803,16 @@ export const register: Register = on => {
     ])
 
     loadReadings($, cwd, at)
+    void (async () => {
+      const u = await read($, upgrade)
+      if (u.stage === 'reading' || u.stage === 'rewriting') {
+        await update($, upgrade, (cur): UpgradeState => ({ ...cur, stage: 'error', error: 'OneLiner reloaded during this step.' }))
+      }
+    })()
     void $.session.model().then(m => { sessionModel = m }).catch(() => {})
+    void $.session.usage().then(async usage => {
+      if (usage.cost) reportedCost = await conversationCost($, usage.startedAt, usage.cost.usd)
+    }).catch(() => {})
     // A server stopped (or started) outside OneLiner shows within seconds: every 5 s while it runs, 15 s while down.
     let devTicks = 0
     $.clock.every(5_000, () => {
@@ -1610,6 +1875,7 @@ export const register: Register = on => {
     const isFromYou = !['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay'].includes(e.origin.kind)
     if (isFromYou && e.text.trim() && !e.text.startsWith('/')) {
       spawnedThisTask = 0
+      isTaskTurn = true
       const a = await update($, agents, (s): AgentsState => ({ ...s, helpers: [] }))
       if (a.cap !== null) return next({ ...e, context: [...(e.context ?? []), helperInstruction(a.cap)] })
     }
@@ -1640,6 +1906,10 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId) {
+      if (e.usage) {
+        const [c, l] = await Promise.all([read($, cache), read($, limit)])
+        void recordReport($, turnTokens(e.usage, cacheTtl(c, l)))
+      }
       // A helper's own turn ends it.
       const agentId = e.agentId
       const isFailed = e.reason === 'error' || e.isAborted
@@ -1673,7 +1943,32 @@ export const register: Register = on => {
       // Still running (in the background): the main turn their results start ends it.
       if (isArmed(s) && s.helpers.length > 0 && !s.helpers.some(h => h.status === 'running')) await disarmAgents($)
     })()
+    // Stopped (Esc), maybe to rewind: Claude Code may take the strip down and only draw it again on a
+    // state change. A few redraws over the next seconds bring it straight back.
+    if (e.isAborted) for (const ms of [1_000, 3_000, 8_000]) $.clock.after(ms, () => void update($, now, () => Date.now()))
     if (e.usage?.model) sessionModel = e.usage.model
+    {
+      const wasTask = isTaskTurn && e.reason === 'answer' && !e.isAborted
+      isTaskTurn = false
+      const turnUsage = e.usage
+      const durationMs = e.durationMs
+      void (async () => {
+        const usage = await $.session.usage().catch(() => null)
+        const total = usage?.cost ? await conversationCost($, usage.startedAt, usage.cost.usd) : null
+        const usd = total !== null && reportedCost !== null ? Math.max(0, total - reportedCost) : 0
+        if (total !== null) reportedCost = total
+        const [c, l] = await Promise.all([read($, cache), read($, limit)])
+        await recordReport($, {
+          ...(turnUsage ? turnTokens(turnUsage, cacheTtl(c, l)) : {}),
+          usd,
+          aiMs: durationMs,
+          tasks: wasTask ? 1 : 0,
+          model: turnUsage?.model ?? (sessionModel || undefined),
+          project: cwd ? baseName(cwd) : undefined,
+          session: usage?.startedAt,
+        })
+      })()
+    }
     const options = extractNextSteps(e.answer)
     await update($, nextSteps, (): NextState => ({
       isOpen: false, fromAnswer: options, ai: [], aiGrades: [], optionGrades: options.map(recommendedGrade), aiStatus: 'idle', aiVia: null,
@@ -1744,6 +2039,13 @@ export const register: Register = on => {
     return result
   })
 
+  // The app (re)attached to the session, e.g. after a rewind or a reconnect: draw the strip again now.
+  on('session.attach', async ($, e, next) => {
+    const result = await next(e)
+    $.clock.after(500, () => void update($, now, () => Date.now()))
+    return result
+  })
+
   // Remember that Claude changed project files this turn (notes and docs don't count).
   on('tool.call', async ($, e, next) => {
     const result = await next(e)
@@ -1797,15 +2099,35 @@ export const register: Register = on => {
     return { text: 'Writing the handoff from this conversation; you\'ll be asked before anything is saved.' }
   })
 
+  on('command.run', { command: 'report' }, async $ => {
+    void (async () => {
+      try {
+        if ((await $.ui.panes()).some(p => p.id === REPORT_PANE)) await $.ui.close({ id: REPORT_PANE })
+        else await openReport($)
+      } catch {}
+    })()
+    return {}
+  })
+
   on('command.run', { command: 'limits' }, async $ => {
-    await $.ui.open({ id: LIMITS_PANE, title: '5h limit' })
-    return {} // the pane or popup is the answer: no transcript line
+    // Answered at once, the pane opened after: a command that waits on its own pane may not answer.
+    // A second /limits closes it.
+    void (async () => {
+      try {
+        const isOpen = (await $.ui.panes()).some(p => p.id === LIMITS_PANE)
+        if (isOpen) await $.ui.close({ id: LIMITS_PANE })
+        else await $.ui.open({ id: LIMITS_PANE, title: '5h limit', closeOnEscape: true })
+      } catch {
+        $.ui.toast('The 5h limit chart could not open here: widen the window and try again')
+      }
+    })()
+    return {} // the pane is the answer: no transcript line
   })
 
   on('ui.render', { component: 'Pane', requestId: LIMITS_PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const [l, at] = await Promise.all([read($, limit), read($, now)])
-    const h = ((await $.store.get(HISTORY_KEY)) as History | undefined) ?? { resetsAt: null, points: [] }
+    const history = ((await $.store.get(HISTORY_KEY)) as History | undefined) ?? { resetsAt: null, points: [] }
     const width = Math.max(20, Math.min(72, ((e.props as { bodyColumns?: number }).bodyColumns ?? 60) - 8))
     const close = <Button key="limits-close" role="dismiss" label="Close" onPress={() => void $.ui.close({ id: LIMITS_PANE })} />
     if (l.percent === null || !l.resetsAt) {
@@ -1824,7 +2146,7 @@ export const register: Register = on => {
       const span = last.at - first.at
       return span >= FORECAST_MIN_SPAN_MS ? ((last.pct - first.pct) / span) * 3_600_000 : null
     })()
-    const points = h.resetsAt === l.resetsAt ? h.points : []
+    const points = history.resetsAt === l.resetsAt ? history.points : []
     // Each column is a slice of the 5h window: past → last reading; future → the forecast line.
     const past: (number | null)[] = []
     const future: (number | null)[] = []
@@ -1959,6 +2281,8 @@ export const register: Register = on => {
     const ag = await read($, agents)
     const agentsOpen = ag.isOpen
     const runningHelpers = ag.helpers.filter(h => h.status === 'running').length
+    const upgradeStage = (await read($, upgrade)).stage
+    const upgradeBusy = upgradeStage === 'reading' || upgradeStage === 'rewriting'
     if (demoLevel) ({ g, d, l, c, ctx, n } = demoFixture(demoLevel, at || Date.now(), n))
     // Past its reset the window is empty, even before the next turn reports a new reading.
     if (l.resetsAt && (at || Date.now()) >= Date.parse(l.resetsAt)) l = { ...l, percent: 0, resetsAt: null, samples: [] }
@@ -1975,6 +2299,8 @@ export const register: Register = on => {
       buttons?: { label: string; onPress: () => void }[] // more buttons after `button`
       detailButtons?: { label: string; onPress: () => void }[] // actions offered only on hover
       toggle?: { label: string; onPress: () => void } // a plain ▾ / ▴ right after the text (git's changes panel)
+      isActionFirst?: boolean // its buttons go before the text, outside its hover (git's ▴, dev's Start)
+      isDetailShown?: boolean // the detail stays out, no hover needed (git's, while the changes panel is open)
     }
     const segs: Seg[] = []
     const segTextLen = (s: Seg) => s.text.length + (s.extras ?? []).reduce((n, x) => n + x.text.length, 0)
@@ -2022,6 +2348,8 @@ export const register: Register = on => {
         ].filter(Boolean).join(' · '),
         detailMode: 'push',
         toggle: { label: changesOpen ? '▾' : '▴', onPress: toggleChanges },
+        isActionFirst: true,
+        isDetailShown: changesOpen,
       })
     }
 
@@ -2038,6 +2366,7 @@ export const register: Register = on => {
       segs.push({
         id: 'dev', text: s.text, color: 'color' in s ? s.color : undefined, dim: 'dim' in s && s.dim,
         button: d.status === 'down' ? { label: 'Start', onPress: () => void startDev($, cwd) } : undefined,
+        isActionFirst: true,
         detail: d.status === 'error' ? (d.error ?? 'see the dev server output')
           : d.status === 'up' ? `http://localhost:${d.port}`
           : d.status === 'starting' ? `localhost:${d.port}`
@@ -2179,7 +2508,8 @@ export const register: Register = on => {
       + (s.toggle ? 2 : 0)
       + (s.buttons ?? []).reduce((w, b) => w + b.label.length + 5, 0) + 3
     // ◈ (and its count) sits on the right with next: its room counts too.
-    const agentsWidth = hiddenParts.includes('agents') ? 0 : 4 + (runningHelpers > 0 || ag.cap !== null ? 6 : 0)
+    const agentsWidth = (hiddenParts.includes('agents') ? 0 : 4 + (runningHelpers > 0 || ag.cap !== null ? 6 : 0))
+      + (hiddenParts.includes('upgrade') ? 0 : 4)
     const total = (list: Seg[]) => list.reduce((n, s) => n + width(s), agentsWidth)
     let shown = segs.filter(s => !hiddenParts.includes(s.id))
     for (const level of [1, 2, 3]) {
@@ -2206,6 +2536,22 @@ export const register: Register = on => {
         </Box>
       )
     }
+    // A part's buttons, in a keyed box of their own. Before the text (git, dev): outside its hover, so
+    // pointing at them never opens the detail. After the text (the rest): before the detail, so it never moves them.
+    const actsOf = (s: Seg) => (s.button || s.toggle || (s.buttons ?? []).length > 0) && (
+      <Box key={`${s.id}-acts`} flexDirection="row" gap={1} marginLeft={s.isActionFirst ? 0 : 1}>
+        {/* A button and the panel's arrow sit tight together, no gap. */}
+        {s.button && s.toggle && (
+          <Box flexDirection="row">
+            <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />
+            <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />
+          </Box>
+        )}
+        {s.button && !s.toggle && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
+        {s.toggle && !s.button && <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />}
+        {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
+      </Box>
+    )
     // Segments on the left; the next button pinned to the right edge.
     const nextSeg = shown.find(s => s.id === 'next')
     const leftSegs = shown.filter(s => s.id !== 'next')
@@ -2217,26 +2563,12 @@ export const register: Register = on => {
           // No gaps between parts: each part's hover area runs up to the next one, so crossing never drops the details.
           <Box key={s.id} flexDirection="row" gap={1} paddingRight={1}>
             {i > 0 && <Text dimColor>│</Text>}
+            {s.isActionFirst && actsOf(s)}
             {/* Keyed: the hover scope is the text alone, so ▾ and the buttons beside it take a click without the details opening. */}
             <Box key={`${s.id}-main`} flexDirection="row">
               {s.text !== '' && <Text color={s.color} dimColor={s.dim} wrap="truncate">{s.text}</Text>}
               {(s.extras ?? []).map(x => <Text color={x.color} dimColor={x.dim} wrap="truncate">{x.text}</Text>)}
-              {/* The part's buttons sit before the detail, so it opening never moves them; keyed apart, so the
-                  pointer on them doesn't open it either. */}
-              {(s.button || s.toggle || (s.buttons ?? []).length > 0) && (
-                <Box key={`${s.id}-acts`} flexDirection="row" gap={1} marginLeft={1}>
-                  {/* A button and the panel's arrow sit tight together, no gap. */}
-                  {s.button && s.toggle && (
-                    <Box flexDirection="row">
-                      <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />
-                      <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />
-                    </Box>
-                  )}
-                  {s.button && !s.toggle && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
-                  {s.toggle && !s.button && <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />}
-                  {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
-                </Box>
-              )}
+              {!s.isActionFirst && actsOf(s)}
               {s.detail && (
                 s.detailMode === 'over'
                   // Written over the parts to its right while hovered, on the same line: nothing moves.
@@ -2244,7 +2576,7 @@ export const register: Register = on => {
                       <Text dimColor wrap="truncate">{` · ${s.detail}`}</Text>
                     </Box>
                   // Pushes the parts to its right aside while hovered.
-                  : <Box display="none" gap={1} hover={{ display: 'flex' }}>
+                  : <Box display={s.isDetailShown ? 'flex' : 'none'} gap={1} hover={s.isDetailShown ? undefined : { display: 'flex' }}>
                       <Text dimColor wrap="truncate">{` · ${s.detail}`}</Text>
                       {(s.detailButtons ?? []).map((b, i) => <Button key={`${s.id}-hover-btn-${i}`} label={b.label} onPress={b.onPress} />)}
                     </Box>
@@ -2254,6 +2586,10 @@ export const register: Register = on => {
         ))}
         </Box>
         <Box flexDirection="row" gap={1} flexShrink={0} marginLeft={1}>
+          {/* ⇡ upgrades what you typed in the prompt box, in a pane of its own. */}
+          {!hiddenParts.includes('upgrade') && (
+            <Button key="upgrade-btn" plain label={upgradeBusy ? '⇡…' : '⇡'} onPress={() => void startUpgrade($, cwd)} />
+          )}
           {/* ◈ opens the agents panel; beside it the helpers working now, or the cap set for the next task. */}
           {!hiddenParts.includes('agents') && (
             <Box flexDirection="row">
@@ -2261,6 +2597,13 @@ export const register: Register = on => {
               {runningHelpers > 0
                 ? <Text color="success">{` ${runningHelpers}${ag.cap !== null ? `/${ag.cap}` : ''}`}</Text>
                 : ag.cap !== null ? <Text color={AGENTS_ARMED_COLOR}>{` ${ag.cap}`}</Text> : null}
+            </Box>
+          )}
+          {/* While the changes panel is open, its close sits where next's arrow does, as in the other panels. */}
+          {changesOpen && (
+            <Box flexDirection="row" gap={1}>
+              <Text dimColor>changes</Text>
+              <Button key="changes-close-btn" plain label=" ▾  " onPress={toggleChanges} />
             </Box>
           )}
           {nextSeg?.button && (
@@ -2496,13 +2839,11 @@ export const register: Register = on => {
           ))}
           {toPush.length > 3 && note(`+${toPush.length - 3} more to push`)}
           {rule}
-          <Box flexDirection="row" width={cols} justifyContent="space-between">
-            <Box flexDirection="row" gap={1} marginLeft={2}>
-              {canShip && <Button key="ch-ship" variant="primary" label="Ship" onPress={() => { closeChanges(); void ship($) }} />}
-              {stats.length > 0 && <Button key="ch-diff" label={`+${g.added ?? 0} −${g.removed ?? 0}`} onPress={() => void openDiff($, paths, 0)} />}
-              {canPr && <Button key="ch-pr" label="Create PR" onPress={() => { closeChanges(); void createPr($) }} />}
-            </Box>
-            <Button key="ch-close" role="dismiss" label="Close" onPress={closeChanges} />
+          {/* No Close: "changes ▾" in the strip's right corner (or git's ▾) closes the panel. */}
+          <Box flexDirection="row" gap={1} marginLeft={2}>
+            {canShip && <Button key="ch-ship" variant="primary" label="Ship" onPress={() => { closeChanges(); void ship($) }} />}
+            {stats.length > 0 && <Button key="ch-diff" label={`+${g.added ?? 0} −${g.removed ?? 0}`} onPress={() => void openDiff($, paths, 0)} />}
+            {canPr && <Button key="ch-pr" label="Create PR" onPress={() => { closeChanges(); void createPr($) }} />}
           </Box>
         </Box>
       )
@@ -2567,7 +2908,10 @@ export const register: Register = on => {
         </Box>
         <Box flexDirection="row" width={cols} justifyContent="space-between">
           {styledRow('next-0', '0', <Text color="error">close</Text>, toggleNext)}
-          {credit}
+          <Box flexDirection="row" gap={1}>
+            <Button key="next-report" plain hotkey="r" label="▤ report" onPress={() => void openReport($)} />
+            {credit}
+          </Box>
         </Box>
       </Box>
     )
@@ -2609,6 +2953,280 @@ export const register: Register = on => {
         <Box flexDirection="row" gap={1} marginTop={1}>
           {firstStep && <Button key="continue" variant="primary" label="Continue with 1" onPress={() => fill(firstStep)} />}
           <Button key="dismiss" role="dismiss" label="Dismiss" onPress={() => void $.ui.close({ id: BRIEF_PANE })} />
+        </Box>
+      </Box>
+    )
+  })
+
+  // ── the report pane ───────────────────────────────────────────
+  on('ui.render', { component: 'Pane', requestId: REPORT_PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const [tab, at] = await Promise.all([read($, reportTab), $.clock.now()])
+    const width = Math.max(32, Math.min(96, ((e.props as { bodyColumns?: number }).bodyColumns ?? 72) - 4))
+    const days = await reportDays($, tab, at)
+    const sum = days.reduce((t, { day }) => {
+      if (!day) return t
+      for (const [m, v] of Object.entries(day.models)) {
+        const cur = t.models[m] ?? { tasks: 0, usd: 0 }
+        t.models[m] = { tasks: cur.tasks + v.tasks, usd: cur.usd + v.usd }
+      }
+      for (const [p, n] of Object.entries(day.projects)) t.projects[p] = (t.projects[p] ?? 0) + n
+      for (const id of day.sessions) t.sessions.add(id)
+      return {
+        ...t, tasks: t.tasks + day.tasks, aiMs: t.aiMs + day.aiMs, usd: t.usd + day.usd,
+        tokens: t.tokens + day.input + day.output + day.cacheRead + day.cacheWrite,
+        cacheRead: t.cacheRead + day.cacheRead, weighted: t.weighted + day.weighted,
+      }
+    }, { tasks: 0, aiMs: 0, usd: 0, tokens: 0, cacheRead: 0, weighted: 0, sessions: new Set<number>(), models: {} as Record<string, { tasks: number; usd: number }>, projects: {} as Record<string, number> })
+    // What the tokens read from cache would have cost at the full input price, less what they did cost:
+    // 0.9 of an input token each, at the price the period's own cost and tokens work out to.
+    const cacheSaved = sum.weighted > 0 ? (sum.cacheRead * 0.9 * sum.usd) / sum.weighted : 0
+    const first = days[0]!.date
+    const last = days[days.length - 1]!.date
+    const dateLabel = tab === 'today'
+      ? `${WEEKDAYS[last.getDay()]}, ${MONTHS[last.getMonth()]} ${last.getDate()}`
+      : `${MONTHS[first.getMonth()]} ${first.getDate()} - ${MONTHS[last.getMonth()]} ${last.getDate()}${tab === 'year' ? `, ${last.getFullYear()}` : ''}`
+    const titles = { today: "TODAY'S WORK", week: 'THIS WEEK', month: 'LAST 30 DAYS', year: `${last.getFullYear()} SO FAR` } as const
+    const tabs = (['today', 'week', 'month', 'year'] as const).map(t => (
+      <Button key={`rep-${t}`} variant={t === tab ? 'primary' : undefined} label={t[0]!.toUpperCase() + t.slice(1)} onPress={() => void update($, reportTab, () => t)} />
+    ))
+    // A line of exactly `w` cells (or the rest of the row): drawn long, clipped by its Box, so it never wraps
+    // where the font's dashes are not one cell wide (the desktop app).
+    const line = (key: string, w: number | null, char: string, color?: string, isDim = true) => (
+      <Box key={key} width={w ?? undefined} flexGrow={w === null ? 1 : 0} flexShrink={w === null ? 1 : 0} overflow="hidden" height={1}>
+        {/* Wrapped, not truncated (that adds "…"): the rest falls to a second row the 1-row Box never shows. */}
+        <Text color={color} dimColor={isDim && !color} wrap="wrap">{char.repeat(Math.max(1, (w ?? width) * 2))}</Text>
+      </Box>
+    )
+    const heading = (text: string) => (
+      <Box flexDirection="row" marginTop={1} gap={1}>
+        <Box flexShrink={0}><Text dimColor bold wrap="truncate">{text}</Text></Box>
+        {line(`rule-${text}`, null, '─')}
+      </Box>
+    )
+    // Tiles: three, then two, then one as the pane narrows.
+    const tileCount = width >= 66 ? 3 : width >= 44 ? 2 : 1
+    const tileW = Math.floor((width - (tileCount - 1)) / tileCount)
+    const tile = (key: string, label: string, value: string, note: string, color: string) => (
+      <Box key={key} flexDirection="column" borderStyle="round" borderDimColor width={tileW} paddingX={1}>
+        <Text dimColor bold>{label}</Text>
+        <Text bold color={color}>{value}</Text>
+        <Text dimColor>{note}</Text>
+      </Box>
+    )
+    const tiles = [
+      tile('t-time', 'AI TIME', hoursShort(sum.aiMs), 'Claude working', REPORT_GOLD),
+      tile('t-sessions', 'SESSIONS', String(sum.sessions.size), `${sum.tasks} task${sum.tasks === 1 ? '' : 's'}`, '#6a6ae4'),
+      tile('t-price', 'API PRICE', usdShort(sum.usd), 'at API rates', 'success'),
+    ].slice(0, tileCount)
+    const barMax = Math.max(8, width - 40)
+    const bar = (share: number, color: string) => line(`bar-${color}-${share}`, Math.max(1, Math.round(share * barMax)), '━', color)
+    const models = Object.entries(sum.models).sort((a, b) => b[1].tasks - a[1].tasks || b[1].usd - a[1].usd).slice(0, 5)
+    const projects = Object.entries(sum.projects).sort((a, b) => b[1] - a[1]).slice(0, 5)
+    const topTasks = Math.max(1, ...models.map(([, v]) => v.tasks), ...projects.map(([, n]) => n))
+    const row = (key: string, color: string, name: string, share: number, right: string) => (
+      <Box key={key} flexDirection="row" gap={1}>
+        <Text color={color}>●</Text>
+        <Box width={18} flexShrink={0}><Text wrap="truncate">{name}</Text></Box>
+        <Box width={barMax} flexShrink={0}>{bar(share, color)}</Box>
+        <Box flexGrow={1} justifyContent="flex-end"><Text wrap="truncate">{right}</Text></Box>
+      </Box>
+    )
+    // The chart: AI time per day (the last 7 for Today and Week, 30 for Month), per month for the year.
+    const buckets = tab === 'year'
+      ? MONTHS.map((name, m) => ({
+          label: name,
+          ms: days.filter(d => d.date.getMonth() === m).reduce((t, d) => t + (d.day?.aiMs ?? 0), 0),
+          isNow: m === last.getMonth(), isFuture: m > last.getMonth(),
+        }))
+      : (tab === 'month' ? days : (tab === 'today' ? null : days))?.map(d => ({
+          label: tab === 'month' ? String(d.date.getDate()) : WEEKDAYS[d.date.getDay()]!, ms: d.day?.aiMs ?? 0,
+          isNow: d === days[days.length - 1], isFuture: false,
+        })) ?? null
+    const weekDays = tab === 'today' ? await reportDays($, 'week', at) : null
+    const chartBuckets = buckets ?? weekDays!.map((d, i, all) => ({ label: WEEKDAYS[d.date.getDay()]!, ms: d.day?.aiMs ?? 0, isNow: i === all.length - 1, isFuture: false }))
+    const colW = Math.max(1, Math.min(tab === 'month' ? 2 : 4, Math.floor(width / chartBuckets.length) - 1))
+    const peak = Math.max(1, ...chartBuckets.map(b => b.ms))
+    const CHART_ROWS = 4
+    const filled = chartBuckets.map(b => (b.isFuture || b.ms <= 0 ? 0 : Math.max(1, Math.round((b.ms / peak) * CHART_ROWS))))
+    const streakDays = await reportDays($, 'month', at)
+    const best = tab === 'year'
+      ? chartBuckets.reduce((a, b) => (b.ms > a.ms ? b : a), chartBuckets[0]!)
+      : days.reduce((a, b) => ((b.day?.aiMs ?? 0) > (a.day?.aiMs ?? 0) ? b : a), days[0]!)
+    const activeDays = days.filter(d => d.day?.tasks).length
+    const summary = tab === 'today' || tab === 'week'
+      ? `${hoursShort(chartBuckets.reduce((t, b) => t + b.ms, 0))} of AI time in the last 7 days · ${reportStreak(streakDays)} day streak`
+      : `${activeDays} active day${activeDays === 1 ? '' : 's'}${'ms' in best
+          ? ` · best month ${best.label}`
+          : best.day?.aiMs ? ` · best day ${MONTHS[best.date.getMonth()]} ${best.date.getDate()}` : ''}`
+    const isEmpty = sum.tasks === 0 && sum.usd === 0
+    return (
+      <Box flexDirection="column" width={width}>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">{tabs}</Box>
+        <Box flexDirection="row" justifyContent="space-between" marginTop={1}>
+          <Text bold>{titles[tab]}</Text>
+          <Text dimColor>{dateLabel}</Text>
+        </Box>
+        <Box flexDirection="row">
+          {line('title-gold', titles[tab].length + 2, '━', REPORT_GOLD)}
+          {line('title-rest', null, '─')}
+        </Box>
+        {isEmpty ? (
+          <Box marginTop={1}><Text dimColor>{tab === 'today'
+            ? 'Nothing finished yet today. Your first finished task shows up here.'
+            : 'Nothing recorded for this stretch yet. OneLiner counts from the day it was installed.'}</Text></Box>
+        ) : (
+          <Box flexDirection="column">
+            <Box flexDirection="row" gap={1} marginTop={1}>{tiles}</Box>
+            <Text dimColor>{[
+              cacheSaved >= 0.01 ? `cache saved ~${usdShort(cacheSaved)}` : '',
+              `${sum.tasks} task${sum.tasks === 1 ? '' : 's'}`,
+              `${tokensShort(sum.tokens)} tokens`,
+            ].filter(Boolean).join(' · ')}</Text>
+            {models.length > 0 && heading('WHO DID THE WORK')}
+            {models.map(([m, v], i) => row(`rep-m-${i}`, REPORT_COLORS[i % REPORT_COLORS.length]!, shortModel(m), v.tasks / topTasks, `${v.tasks} task${v.tasks === 1 ? '' : 's'} · ${usdShort(v.usd)}`))}
+            {projects.length > 0 && heading('WHERE IT WENT')}
+            {projects.map(([p, n], i) => row(`rep-p-${i}`, REPORT_COLORS[(i + 2) % REPORT_COLORS.length]!, baseName(p), n / topTasks, `${n} task${n === 1 ? '' : 's'}`))}
+          </Box>
+        )}
+        {heading(tab === 'year' ? `${last.getFullYear()} BY MONTH` : tab === 'month' ? 'LAST 30 DAYS' : 'LAST 7 DAYS')}
+        <Box flexDirection="row" gap={1} marginTop={1} alignItems="flex-end">
+          {chartBuckets.map((b, ci) => (
+            <Box key={`rep-col-${ci}`} flexDirection="column" width={colW} justifyContent="flex-end" height={CHART_ROWS}>
+              {filled[ci]! > 0
+                ? <Box width={colW} height={filled[ci]!} backgroundColor={b.isNow ? REPORT_GOLD : '#6a6ae4'}><Text> </Text></Box>
+                : line(`rep-base-${ci}`, colW, '▁', b.isFuture ? undefined : '#3a3a55')}
+            </Box>
+          ))}
+        </Box>
+        {tab !== 'month' && (
+          <Box flexDirection="row" gap={1}>
+            {chartBuckets.map((b, ci) => (
+              <Box key={`rep-label-${ci}`} width={colW} overflow="hidden"><Text bold={b.isNow} dimColor={!b.isNow} wrap="truncate">{b.label}</Text></Box>
+            ))}
+          </Box>
+        )}
+        <Text bold>{summary}</Text>
+        <Box marginTop={1}><Text dimColor italic>AI time is how long Claude worked. API price is what the same work costs at API rates, as Claude Code prices each response; on a subscription you pay your plan instead.</Text></Box>
+      </Box>
+    )
+  })
+
+  // ── the upgrade pane ──────────────────────────────────────────
+  on('ui.render', { component: 'Pane', requestId: UPGRADE_PANE }, async ($, e) => {
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    // A typed answer needs a text field; a surface without one offers the options and Skip alone.
+    const Input = 'Input' in elements ? elements.Input : null
+    const u = await read($, upgrade)
+    const steps = ['Your prompt', 'Questions', 'Rewrite', 'Review'] as const
+    const current = u.stage === 'reading' ? 1 : u.stage === 'questions' ? 1 : u.stage === 'rewriting' ? 2 : u.stage === 'review' ? 3 : 0
+    const heading = (text: string, right?: string) => (
+      <Box flexDirection="row" justifyContent="space-between" marginTop={1}>
+        <Text dimColor bold>{text}</Text>
+        {right ? <Text dimColor>{right}</Text> : null}
+      </Box>
+    )
+    const card = (title: string, text: string, isGold = false) => (
+      <Box flexDirection="column" borderStyle="round" borderColor={isGold ? UPGRADE_GOLD : undefined} borderDimColor={!isGold} paddingX={1}>
+        <Text dimColor bold>{title}</Text>
+        <Text wrap="wrap">{text}</Text>
+      </Box>
+    )
+    const tracker = (
+      <Box flexDirection="row" gap={2}>
+        {steps.map((name, i) => (
+          <Text color={i < current ? 'success' : i === current ? UPGRADE_GOLD : undefined} dimColor={i > current} bold={i === current}>
+            {`${i < current ? '✓' : i === current ? '●' : '○'} ${name}`}
+          </Text>
+        ))}
+      </Box>
+    )
+    const cancel = <Button key="up-cancel" role="dismiss" label="Cancel" onPress={() => void closeUpgrade($)} />
+    if (u.stage === 'idle') {
+      return <Box flexDirection="column"><Text dimColor>Type a prompt in the box, then press ⇡ on the strip.</Text>{cancel}</Box>
+    }
+    if (u.stage === 'error') {
+      return (
+        <Box flexDirection="column">
+          <Text bold color={UPGRADE_GOLD}>PROMPT UPGRADE</Text>
+          {tracker}
+          <Box flexDirection="column" borderStyle="round" borderColor="warning" paddingX={1} marginTop={1}>
+            <Text color="warning">{u.error ?? 'Something went wrong.'}</Text>
+            <Text dimColor>Your prompt is safe: it is still in the prompt box.</Text>
+          </Box>
+          <Box flexDirection="row" gap={1} marginTop={1}>
+            <Button key="up-retry" variant="primary" label="Try again" onPress={() => void (u.questions.length ? rewriteUpgrade($, cwd) : startUpgrade($, cwd))} />
+            {cancel}
+          </Box>
+        </Box>
+      )
+    }
+    if (u.stage === 'review') {
+      const before = wordCount(u.original)
+      const after = wordCount(u.rewrite)
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text bold color={UPGRADE_GOLD}>PROMPT UPGRADE</Text>
+            {u.via ? <Text dimColor>{u.via}</Text> : null}
+          </Box>
+          {tracker}
+          <Text dimColor>{`${before} words → ${after} words · ${u.added.length} detail${u.added.length === 1 ? '' : 's'} added`}</Text>
+          {/* The buttons above the cards: a long rewrite never pushes them out of view. */}
+          <Box flexDirection="row" gap={1} marginTop={1}>
+            <Button key="up-use" variant="primary" label="Use it" onPress={() => void useUpgrade($)} />
+            <Button key="up-again" label="Try again" onPress={() => void rewriteUpgrade($, cwd)} />
+            {cancel}
+          </Box>
+          {u.added.length > 0 && heading('WHAT I ADDED')}
+          {u.added.map((x, i) => <Box key={`up-added-${i}`} marginLeft={2}><Text wrap="wrap">{`+ ${x}`}</Text></Box>)}
+          <Box marginTop={1}>{card('UPGRADE', u.rewrite, true)}</Box>
+          {card('YOUR PROMPT', u.original)}
+          <Text dimColor italic>Use it puts the upgrade in the prompt box: read it, change it, press Enter to send.</Text>
+        </Box>
+      )
+    }
+    // Reading, questions, rewriting.
+    const answered = u.questions.filter(q => q.answer !== null).length
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold color={UPGRADE_GOLD}>PROMPT UPGRADE</Text>
+          <Text dimColor>{u.stage === 'questions' ? `${answered} of ${u.questions.length} answered` : u.via ?? ''}</Text>
+        </Box>
+        {tracker}
+        <Box marginTop={1}>{card('YOUR PROMPT', u.original)}</Box>
+        {u.stage === 'reading' && <Text dimColor italic>Reading your prompt and writing a few quick questions…</Text>}
+        {u.stage === 'rewriting' && <Text dimColor italic>Writing the upgrade…</Text>}
+        {u.stage === 'questions' && heading('A FEW QUICK QUESTIONS', 'pick one each, or skip')}
+        {u.stage === 'questions' && u.questions.map((q, i) => (
+          <Box key={`up-q-${i}`} flexDirection="column" marginTop={1}>
+            <Box flexDirection="row" gap={1}>
+              <Text color={q.answer !== null ? 'success' : UPGRADE_GOLD} bold>{q.answer !== null ? '✓' : String(i + 1)}</Text>
+              <Box flexShrink={1}><Text bold wrap="wrap">{q.text}</Text></Box>
+            </Box>
+            <Box flexDirection="row" flexWrap="wrap" gap={1} marginLeft={2}>
+              {q.options.map((o, j) => (
+                <Button key={`up-q-${i}-o-${j}`} variant={q.answer === o ? 'primary' : undefined} label={o} onPress={() => void answerUpgrade($, cwd, i, o)} />
+              ))}
+              {Input && <Button key={`up-q-${i}-other`} label="Other (type it)" onPress={() => void update($, upgrade, (cur): UpgradeState => ({
+                ...cur, questions: cur.questions.map((x, k) => (k === i ? { ...x, isTyping: true } : x)),
+              }))} />}
+              <Button key={`up-q-${i}-skip`} plain label={q.answer === '' ? 'Skipped' : 'Skip'} onPress={() => void answerUpgrade($, cwd, i, '')} />
+            </Box>
+            {q.isTyping && Input && (
+              <Box marginLeft={2}>
+                <Input key={`up-q-${i}-input`} placeholder="Your answer, then Enter" autoFocus submitLabel="answer"
+                  onSubmit={(value: string) => void answerUpgrade($, cwd, i, value.trim())} />
+              </Box>
+            )}
+            {q.answer && !q.options.includes(q.answer) && <Box marginLeft={2}><Text dimColor>{`→ ${q.answer}`}</Text></Box>}
+          </Box>
+        ))}
+        <Box flexDirection="row" gap={1} marginTop={1}>
+          {u.stage === 'questions' && <Button key="up-now" variant="primary" label="Skip the rest, upgrade now" onPress={() => void rewriteUpgrade($, cwd)} />}
+          {cancel}
         </Box>
       </Box>
     )

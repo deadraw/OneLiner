@@ -111,6 +111,48 @@ export type AgentsState = {
   helpers: Helper[]
 }
 
+/**
+ * One day of the work report, in local time: what Claude did and what it would have cost on the API.
+ * Saved per year in $.store (`report:2026`), keyed by `MM-DD`.
+ */
+export type ReportDay = {
+  /** Typed prompts that finished with an answer. */
+  tasks: number
+  /** How long Claude worked on them: the main turns' real length, in ms. */
+  aiMs: number
+  /** What the work cost at API prices, as Claude Code prices each response (helpers included). */
+  usd: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  /** The tokens weighted by their API price ratios (input 1, output 5, cache write 1.25 or 2, cache read 0.1). */
+  weighted: number
+  /** Conversations worked in that day, by their first launch. */
+  sessions: number[]
+  models: Record<string, { tasks: number; usd: number }>
+  projects: Record<string, number>
+}
+
+/** One question Prompt Upgrade asks: its options, and the answer (null: not yet; '' skipped). */
+export type UpgradeQuestion = { text: string; options: string[]; answer: string | null; isTyping: boolean }
+
+/**
+ * Prompt Upgrade (⇡): your rough prompt, up to three questions, then the rewrite to review. Nothing is
+ * sent: Use it puts the rewrite in the prompt box.
+ */
+export type UpgradeState = {
+  stage: 'idle' | 'reading' | 'questions' | 'rewriting' | 'review' | 'error'
+  original: string
+  questions: UpgradeQuestion[]
+  rewrite: string
+  /** What the rewrite added, a few words each. */
+  added: string[]
+  /** What answered: the conversation's own model over its cache, or Claude Sonnet on a short digest. */
+  via: string | null
+  error: string | null
+}
+
 /** The handoff flow in the strip's row: the draft to confirm, then the saved file. */
 export type HandoffStep =
   | { stage: 'draft'; path: string; name: string; text: string; previous: string; added: number; removed: number; isNew: boolean }
@@ -158,6 +200,10 @@ declare module 'claude-code' {
       rowAsk: { text: string; options: string[] } | null
       /** The changes panel under the strip (a click on git's ▾). */
       isChangesOpen: boolean
+      /** The report pane's tab. */
+      reportTab: 'today' | 'week' | 'month' | 'year'
+      /** Prompt Upgrade's pane: the step it is on and what it has so far. */
+      upgrade: UpgradeState
       /** Helper agents: the cap and model for the task, and the helpers it started (◈ on the strip). */
       agents: AgentsState
       /** The file the diff pane shows, or null. */
