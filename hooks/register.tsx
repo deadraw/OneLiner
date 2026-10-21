@@ -56,7 +56,6 @@ const nextSteps = atom({ plugin: 'oneliner', key: 'next' } as const, {
 } as NextState)
 const remoteSeen = atom({ plugin: 'oneliner', key: 'remoteSeen' } as const, null as string | null)
 const isWritingHandoff = atom({ plugin: 'oneliner', key: 'isWritingHandoff' } as const, false)
-const autoUpdateOffer = atom({ plugin: 'oneliner', key: 'autoUpdateOffer' } as const, false)
 const rowAsk = atom({ plugin: 'oneliner', key: 'rowAsk' } as const, null as { text: string; options: string[] } | null)
 const handoffStep = atom({ plugin: 'oneliner', key: 'handoffStep' } as const, null as HandoffStep | null)
 const demo = atom({ plugin: 'oneliner', key: 'demo' } as const, null as string | null)
@@ -560,7 +559,8 @@ async function prText($: $, base: string): Promise<{ title: string; body: string
 
 // ── loading the strip, and reloading it while developing ────────
 
-let version = '' // from plugin.json, for the credit line
+/** For the credit line. Raised with plugin.json and marketplace.json at every release. */
+const VERSION = '1.0.8'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: $, cwd: string, at: number) {
@@ -572,10 +572,6 @@ function loadReadings($: $, cwd: string, at: number) {
     await update($, dev, (): DevState => ({ port: found?.port ?? null, status: found ? 'down' : 'none', error: null }))
     await probeDev($)
   })()
-  void (async () => {
-    try { version = String(JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))).version ?? '') } catch {}
-  })()
-  void autoUpdateSettingsPath($).then(path => update($, autoUpdateOffer, () => path !== null))
 }
 
 /**
@@ -599,7 +595,6 @@ async function reloadStrip($: $, cwd: string, isFresh: boolean) {
   ])
   if (isFresh) {
     await Promise.all([
-      $.store.delete(AUTO_UPDATE_ASKED_KEY),
       $.store.delete(storeKey(cwd)),
       $.store.delete(briefCacheKey(cwd)),
       update($, cache, (c): CacheState => ({ ...c, lastTurnAt: null, resetReason: null })),
@@ -1524,59 +1519,6 @@ async function closeUpgrade($: $) {
   await $.ui.close({ id: UPGRADE_PANE }).catch(() => {})
 }
 
-// ── auto-update (marketplace installs) ──────────────────────────
-
-const MARKETPLACE = 'deadraw'
-const MARKETPLACE_URL = 'https://github.com/deadraw/OneLiner.git'
-const AUTO_UPDATE_ASKED_KEY = 'autoUpdate:asked' // one $.store value: asked once per machine
-
-type MarketplaceEntry = { source?: unknown; autoUpdate?: boolean }
-type Settings = Record<string, unknown> & { extraKnownMarketplaces?: Record<string, MarketplaceEntry> }
-
-/** ~/.claude/settings.json when OneLiner runs from a marketplace install; null for a git clone or plugin folder. */
-function marketplaceSettingsPath(pluginRoot: string): string | null {
-  const root = pluginRoot.replace(/\\/g, '/')
-  const at = root.indexOf(`/plugins/cache/${MARKETPLACE}/`)
-  return at < 0 ? null : `${root.slice(0, at)}/settings.json`
-}
-
-/** The settings path when OneLiner was installed from the marketplace and auto-update is undecided; else null. */
-async function autoUpdateSettingsPath($: $): Promise<string | null> {
-  const path = marketplaceSettingsPath($.plugin.root)
-  if (!path) return null // git clone or plugin folder: updates come from git pull
-  if (await $.store.get(AUTO_UPDATE_ASKED_KEY)) return null
-  try {
-    const settings = JSON.parse(String(await $.fs.read(path))) as Settings
-    if (settings.extraKnownMarketplaces?.[MARKETPLACE]?.autoUpdate === undefined) return path
-  } catch { return null }
-  await $.store.set(AUTO_UPDATE_ASKED_KEY, true) // already decided in settings
-  return null
-}
-
-/**
- * The answer from the strip's Yes / No row, written to ~/.claude/settings.json
- * (Claude Code leaves auto-update off for marketplaces outside Anthropic's own).
- * A row, not $.ui.ask: that dialog is a tool call; asked at the end of a turn, its answer went to the model.
- */
-async function saveAutoUpdate($: $, isOn: boolean) {
-  await update($, autoUpdateOffer, () => false)
-  await $.store.set(AUTO_UPDATE_ASKED_KEY, true)
-  const path = marketplaceSettingsPath($.plugin.root)
-  if (!path) return
-  try {
-    const settings = JSON.parse(String(await $.fs.read(path))) as Settings
-    const entry = settings.extraKnownMarketplaces?.[MARKETPLACE]
-    settings.extraKnownMarketplaces = {
-      ...settings.extraKnownMarketplaces,
-      [MARKETPLACE]: { source: { source: 'git', url: MARKETPLACE_URL }, ...entry, autoUpdate: isOn },
-    }
-    await $.fs.write(path, JSON.stringify(settings, null, 2) + '\n')
-    $.ui.toast(isOn ? 'OneLiner will update itself when Claude Code starts.' : 'Auto-update off. The Update button in Plugins gets new versions.', { timeoutMs: 6000 })
-  } catch {
-    $.ui.toast(`Couldn't save the choice to ${path}. See the README to set it by hand.`, { timeoutMs: 8000 })
-  }
-}
-
 // ── brief ───────────────────────────────────────────────────────
 
 /** Everything a brief or a handoff note is written from: your handoff file, your last asks, Claude's last answer, git. */
@@ -2271,7 +2213,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [hiddenParts, isMenuOpen, writingHandoff, isOfferingUpdate] = await Promise.all([read($, hidden), read($, stripMenu), read($, isWritingHandoff), read($, autoUpdateOffer)])
+    const [hiddenParts, isMenuOpen, writingHandoff] = await Promise.all([read($, hidden), read($, stripMenu), read($, isWritingHandoff)])
     let [g, d, l, c, ctx, at, shipping, n] = await Promise.all([
       read($, git), read($, dev), read($, limit), read($, cache), read($, context), read($, now), read($, isShipping),
       read($, nextSteps),
@@ -2657,19 +2599,6 @@ export const register: Register = on => {
         </Box>
       )
     }
-    if (!n.isOpen && !isMenuOpen && !changesOpen && !agentsOpen && isOfferingUpdate && !demoLevel) {
-      return (
-        <Box flexDirection="column">
-          {strip}
-          <Box flexDirection="row" gap={1}>
-            {gradient('OneLiner', IDEAS_FROM, IDEAS_TO)}
-            <Text dimColor>keep up to date automatically?</Text>
-            <Button key="au-yes" label="Yes" onPress={() => void saveAutoUpdate($, true)} />
-            <Button key="au-no" label="No" onPress={() => void saveAutoUpdate($, false)} />
-          </Box>
-        </Box>
-      )
-    }
     if (!n.isOpen && !isMenuOpen && !changesOpen && !agentsOpen) return strip
 
     // The slide-up: picks fill the prompt (never send), 1–4 / s / 0 as hotkeys.
@@ -2723,7 +2652,7 @@ export const register: Register = on => {
       )
     }
     const note = (text: string) => <Box marginLeft={4}><Text dimColor italic>{text}</Text></Box>
-    const credit = <Text color={CREDIT_COLOR}>{`${version ? `v${version} ` : ''}© deadraw `}</Text>
+    const credit = <Text color={CREDIT_COLOR}>{`v${VERSION} © deadraw `}</Text>
 
     // Agents (◈): how many helpers the next task may start and on which model, a seat for each, then
     // the helpers of this task with what each does and for how long. Armed until a task used them.

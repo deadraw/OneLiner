@@ -192,8 +192,6 @@ declare module 'claude-code' {
       remoteSeen: string | null
       /** True while /handoff is writing. */
       isWritingHandoff: boolean
-      /** After a marketplace install, until answered: the strip's "keep up to date automatically?" row. */
-      autoUpdateOffer: boolean
       /** The handoff in progress: a draft waiting for Write, then saved (Clear & continue / Clear offered). */
       handoffStep: HandoffStep | null
       /** A question shown in a row under the strip (Ship, resend), until answered. */

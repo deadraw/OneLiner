@@ -171,9 +171,7 @@ Requires **Claude Code 2.1.286 or newer** (mods / function hooks).
 
 Or from a terminal: `claude plugin marketplace add deadraw/OneLiner`, then `claude plugin install oneliner@deadraw`. Restart Claude Code and the strip appears after your first message.
 
-**Updates.** After a marketplace install, OneLiner asks once, in a row under the strip: *Keep OneLiner up to date automatically?* Pick **Yes** and new versions install when Claude Code starts. Your answer is saved as `"autoUpdate"` on the marketplace entry in `~/.claude/settings.json` (Claude Code leaves auto-update off by default for marketplaces outside Anthropic's own).
-
-To change it later:
+**Updates.** Claude Code leaves auto-update off by default for marketplaces outside Anthropic's own. To get new versions when Claude Code starts, turn it on:
 
 - **Terminal:** `/plugin` → Marketplaces → **deadraw** → Enable / Disable auto-update.
 - **Desktop app** (or by hand): in `~/.claude/settings.json`, set `"autoUpdate"` to `true` or `false`:
@@ -275,9 +273,41 @@ No telemetry and no services of its own: nothing leaves your machine except thro
 | model calls through your own Claude Code session (listed in [What costs tokens](#what-costs-tokens)) | only from the features in that table |
 | handoff files in your project (with a backup of the previous one), and `.claude/handoff.md` before a compaction | when you ask, and before a compaction |
 | the work report's daily totals, the conversation cost and the last limit reading, in Claude Code's local mod store | after each turn |
-| `"autoUpdate"` on the `deadraw` marketplace entry in `~/.claude/settings.json` | once, after a marketplace install, only after you answer |
 
-It never changes your permission settings and never reads credentials.
+It never changes your permission settings, never writes Claude Code's settings files and never reads credentials.
+
+### What it does inside Claude Code
+
+**Slash commands it runs for you**, only from a button you press:
+
+| Command | When |
+|---|---|
+| `/clear` | **Clear & continue** or **Clear** after a handoff is saved |
+| `/compact` | **Compact** (red ctx or a cold cache) and **♻️** in the ctx hover |
+| `/model <model>` | **Switch model & resend**, after a limit or credit error stopped your prompt |
+
+**Prompts it sends for you**, only after you pick them:
+
+- **Clear & continue**: one prompt, as you, after the clear: *Read ./HANDOFF.md (your handoff file) and then tell me briefly where we left off and propose the next steps. Don't start any work until I confirm which step to take.*
+- **Switch model & resend** and **Resend at HH:MM**: the prompt of yours that the limit stopped, unchanged.
+
+Everything else that goes into your prompt box (next options, ideas, the brief, Prompt Upgrade) is only filled in. You send it with Enter.
+
+**What its model calls read.** `/brief`, ideas, `/handoff`, the handoff note before a compaction, commit messages, Create PR texts and Prompt Upgrade ask Claude a question through your own session. They either go over the cached conversation (a fork of it) or to `SMART_MODEL` with a short digest of your recent prompts, Claude's last answer, your handoff file and `git status`. The answers are shown to you or written to the handoff file; nothing goes anywhere else.
+
+**Files it writes**: your handoff file (`HANDOFF.md`, `CURRENT.md` or the one you already use) and a backup of its previous text, both only after you press **Write**, and `.claude/handoff.md` before a compaction. Claude reads these files when you continue from a handoff, so they are instructions for the next session: they hold what the conversation said, nothing else.
+
+**Hooks**, and what each does:
+
+| Hook | What it does |
+|---|---|
+| `prompt.submit` | Notes the prompt for the report and the next list. With a helper number set in the **◈** panel, it adds one line beside your prompt telling Claude to use at most that many helpers. Your text is never changed. |
+| `agent.spawn` | With a helper number set, refuses a helper past it (with a reason Claude reads). With **Fast & cheap**, gives a helper whose call names no model the model one below yours. On **Auto** it changes nothing. |
+| `turn.complete`, `turn.step`, `session.append`, `tool.call` | Read only: timings, tokens and costs for the strip and the report, Claude's last answer for the next list, a limit error for the resend offer, and whether files were edited (for the dev rebuild check). |
+| `command.run`, `config.set` | Read only: notice `/effort`, `/fast` and thinking changes, which empty the conversation cache. Its own commands (`/ship`, `/handoff`, `/limits`, `/report`, `/strip`, `/brief`) are registered here. |
+| `session.compact` | Writes `.claude/handoff.md` before a compaction and opens the brief after it. The compaction itself is unchanged. |
+| `session.start`, `session.attach`, `classic.SessionStart`, `classic.PreModelSwitch`, `classic.PostModelSwitch` | Read only: start the strip, restore the cache clock on resume, warn before a model switch drops a warm cache. |
+| `ui.render` | Draws the strip above the prompt and its panes. |
 
 ## Customize
 
