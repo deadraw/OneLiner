@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-e34a9e)](LICENSE)
 [![Claude Code 2.1.286+](https://img.shields.io/badge/Claude_Code-2.1.286%2B-d97757)](#install)
 
-![OneLiner in Claude Code: green, yellow, red, the next list and graded ideas](.github/assets/one-liner.gif)
+![OneLiner in Claude Code: green, yellow, red, the next list and graded ideas](https://raw.githubusercontent.com/deadraw/OneLiner/assets/one-liner.gif)
 
 ![All good: everything green](.github/assets/strip_green.png)
 ![Getting tight: uncommitted work, limit filling before reset, cache cooling](.github/assets/strip_yellow.png)
