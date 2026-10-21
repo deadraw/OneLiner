@@ -260,15 +260,24 @@ Almost nothing. Everything on the strip is read from data Claude Code already ha
 | Agents panel and its setting | free. The helpers themselves are Claude working: each runs its own context, so several at once use your limit faster. **Fast & cheap** runs them one model below yours |
 | Handoff note before compaction (`.claude/handoff.md`) | one question over the cached conversation, once per compaction (Claude Sonnet when there is nothing cached yet) |
 
-## Privacy
+## Privacy and what it runs
 
-No telemetry, no external services. The mod only:
+No telemetry and no services of its own: nothing leaves your machine except through Claude Code itself. Everything OneLiner runs, reads or writes:
 
-- runs `git` in your project (including a background `git fetch` every 5 minutes, which downloads but never changes your files),
-- checks your local dev server on `localhost`,
-- reads and writes handoff files in your project when you ask,
-- keeps the work report's daily totals and the conversation cost in Claude Code's local mod store, on your machine,
-- after a marketplace install, writes your auto-update answer to `~/.claude/settings.json`, once, after asking.
+| What | When |
+|---|---|
+| `git` in your project, including a background `git fetch` every 5 minutes (downloads, never changes your files) | always, in a git project |
+| your build (`npm run build`, or `gradlew assembleDebug` in an Android project) | before a `/ship` commit, when `SHIP_BUILD` is on |
+| your dev command (from `.claude/launch.json`, else `npm run dev`) | when you press **Start** |
+| `netstat -ano` and `taskkill /PID <pid> /T /F` on Windows, `lsof` and `kill` elsewhere, on the process listening on your dev port | when you press **■** or **↻** |
+| an HTTP request to `http://localhost:<your dev port>/` | to show whether the dev server is up |
+| `gh` (the GitHub CLI): `gh --version`, `gh pr view`, `gh pr create` | when you press **Create PR** |
+| model calls through your own Claude Code session (listed in [What costs tokens](#what-costs-tokens)) | only from the features in that table |
+| handoff files in your project (with a backup of the previous one), and `.claude/handoff.md` before a compaction | when you ask, and before a compaction |
+| the work report's daily totals, the conversation cost and the last limit reading, in Claude Code's local mod store | after each turn |
+| `"autoUpdate"` on the `deadraw` marketplace entry in `~/.claude/settings.json` | once, after a marketplace install, only after you answer |
+
+It never changes your permission settings and never reads credentials.
 
 ## Customize
 
@@ -296,6 +305,7 @@ Handoff files are looked for at `.claude/handoff.md`, `Current.md`, `CURRENT.md`
 - Claude Code buttons can't be colored, so colored rows are clicked on the small `›` next to them (or with their number key).
 - Switching fast mode or thinking with a **keyboard shortcut** may not be reported to mods; the low `% read` on the next turn still shows the cache was rebuilt.
 - The 5-minute cache in extra usage is detected from the limit reading (≥ 100%).
+- Mods do not run in WSL sessions. In VS Code the strip needs the extension at 2.1.299 or newer.
 - Developed and used on Windows. macOS and Linux should work; reports welcome.
 
 ## License
