@@ -130,8 +130,11 @@ export type ReportDay = {
   weighted: number
   /** Conversations worked in that day, by their first launch. */
   sessions: number[]
-  models: Record<string, { tasks: number; usd: number }>
+  /** By model: its tasks, its cost and (since v1.0.10) its tokens, helpers' included. */
+  models: Record<string, { tasks: number; usd: number; tokens?: number }>
   projects: Record<string, number>
+  /** Tokens by project, helpers' included (since v1.0.10). */
+  projectTokens?: Record<string, number>
 }
 
 /** One question Prompt Upgrade asks: its options, and the answer (null: not yet; '' skipped). */
@@ -200,6 +203,7 @@ declare module 'claude-code' {
       isChangesOpen: boolean
       /** The report pane's tab. */
       reportTab: 'today' | 'week' | 'month' | 'year'
+      reportBy: 'tasks' | 'tokens'
       /** Prompt Upgrade's pane: the step it is on and what it has so far. */
       upgrade: UpgradeState
       /** Helper agents: the cap and model for the task, and the helpers it started (◈ on the strip). */

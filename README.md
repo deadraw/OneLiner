@@ -133,6 +133,7 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 - **AI TIME**: how long Claude worked on your prompts. **SESSIONS**: how many sessions had turns. **API PRICE**: what the same tokens would have cost at API prices, from Claude Code's own cost figures.
 - **~ cache saved**, the one estimate: what the prompt cache took off the bill, from the API's price ratios. Then tasks (prompts you typed that got an answer) and tokens.
 - **WHO DID THE WORK**: the share per model, helpers included. **WHERE IT WENT**: the share per project.
+- **Tasks / Tokens**: the rows count tasks (with the price per model) or tokens. Tokens are kept per model and project from 1.0.10 on; for earlier days a day's total is split by its tasks, marked **~** where several models or projects shared that day.
 - A chart of AI time per day (per month for the year), today in gold, and your streak of active days.
 
 It counts from the moment you install 1.0.8; nothing before that is known. The figures are kept on your machine in Claude Code's mod store, one entry per day. Running `/report` again closes it.
@@ -266,7 +267,7 @@ No telemetry and no services of its own: nothing leaves your machine except thro
 |---|---|
 | `git` in your project, including a background `git fetch` every 5 minutes (downloads, never changes your files) | always, in a git project |
 | your build (`npm run build`, or `gradlew assembleDebug` in an Android project) | before a `/ship` commit, when `SHIP_BUILD` is on |
-| your dev command (from `.claude/launch.json`, else `npm run dev`) | when you press **Start** |
+| your dev command (from `.claude/launch.json`, with its `env`, else `npm run dev`) | when you press **Start** |
 | `netstat -ano` and `taskkill /PID <pid> /T /F` on Windows, `lsof` and `kill` elsewhere, on the process listening on your dev port | when you press **■** or **↻** |
 | an HTTP request to `http://localhost:<your dev port>/` | to show whether the dev server is up |
 | `gh` (the GitHub CLI): `gh --version`, `gh pr view`, `gh pr create` | when you press **Create PR** |

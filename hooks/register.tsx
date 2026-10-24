@@ -64,6 +64,7 @@ const stripMenu = atom({ plugin: 'oneliner', key: 'isStripMenuOpen' } as const, 
 const isChangesOpen = atom({ plugin: 'oneliner', key: 'isChangesOpen' } as const, false)
 const diffView = atom({ plugin: 'oneliner', key: 'diffView' } as const, null as DiffView | null)
 const reportTab = atom({ plugin: 'oneliner', key: 'reportTab' } as const, 'week' as 'today' | 'week' | 'month' | 'year')
+const reportBy = atom({ plugin: 'oneliner', key: 'reportBy' } as const, 'tasks' as 'tasks' | 'tokens') // what the report's rows count
 const UPGRADE_IDLE: UpgradeState = { stage: 'idle', original: '', questions: [], rewrite: '', added: [], via: null, error: null }
 const upgrade = atom({ plugin: 'oneliner', key: 'upgrade' } as const, UPGRADE_IDLE)
 const AGENTS_IDLE: AgentsState = { cap: null, model: 'same', isCustom: false, isOpen: false, helpers: [] }
@@ -297,6 +298,9 @@ async function refreshGit($: Engine): Promise<GitState> {
       runGit($, ['log', '-1', '--format=%ct', '--name-only']).catch(() => null), // the age is drawn from the time, kept current
       runGit($, ['diff', '--numstat', 'HEAD']).catch(() => null),
     ])
+    // A failed status (a timeout, a lock held by another git, a slow start under load) keeps the
+    // last reading: only git saying "not a git repository" takes the part off the strip.
+    if (r.exitCode !== 0 && !/not a git repository/i.test(r.stderr)) return await read($, git)
     if (r.exitCode === 0) {
       next.isRepo = true
       const untracked: string[] = []
@@ -339,7 +343,9 @@ async function refreshGit($: Engine): Promise<GitState> {
         if (p && p.exitCode === 0) next.toPush = p.stdout.split('\n').map(l => l.trim()).filter(Boolean)
       }
     }
-  } catch {}
+  } catch {
+    return await read($, git)
+  }
   await update($, git, () => next)
   return next
 }
@@ -560,7 +566,7 @@ async function prText($: Engine, base: string): Promise<{ title: string; body: s
 // ── loading the strip, and reloading it while developing ────────
 
 /** For the credit line. Raised with plugin.json and marketplace.json at every release. */
-const VERSION = '1.0.9'
+const VERSION = '1.0.10'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: Engine, cwd: string, at: number) {
@@ -654,18 +660,27 @@ async function disarmAgents($: Engine) {
 
 // ── dev server ──────────────────────────────────────────────────
 
-type LaunchConfig = { runtimeExecutable?: string; runtimeArgs?: string[]; port?: number }
+type LaunchConfig = { runtimeExecutable?: string; runtimeArgs?: string[]; port?: number; env?: Record<string, string> }
 
 async function readJson($: Engine, path: string): Promise<any> {
   try { return (await $.fs.exists(path)) ? JSON.parse(String(await $.fs.read(path))) : null } catch { return null }
 }
 
-async function detectDev($: Engine, cwd: string): Promise<{ port: number; argv: string[] } | null> {
+async function detectDev($: Engine, cwd: string): Promise<{ port: number; argv: string[]; env?: Record<string, string> } | null> {
   const launch = await readJson($, `${cwd}/.claude/launch.json`)
   const cfg: LaunchConfig | undefined = launch?.configurations?.find((c: LaunchConfig) => c.port)
   const wrap = (argv: string[]) => (isWindows(cwd) ? ['cmd', '/c', ...argv] : argv)
   if (cfg?.port) {
-    return { port: cfg.port, argv: wrap([cfg.runtimeExecutable ?? 'npm', ...(cfg.runtimeArgs ?? ['run', 'dev'])]) }
+    const exe = cfg.runtimeExecutable ?? 'npm'
+    const args = cfg.runtimeArgs ?? ['run', 'dev']
+    // A path (.venv/Scripts/python.exe) runs as is, from the project: cmd reads its "/" as a switch.
+    // A bare name (npm, npx, php) goes through cmd on Windows, which finds the .cmd shims.
+    const isPath = /[\\/]/.test(exe)
+    const full = /^([A-Za-z]:)?[\\/]/.test(exe) ? exe : `${cwd}/${exe}`
+    const argv = isPath ? [isWindows(cwd) ? full.replace(/\//g, '\\') : full, ...args] : wrap([exe, ...args])
+    // Streamlit asks for an email on its first run and opens a browser: headless skips both.
+    const env = { ...(args.includes('streamlit') ? { STREAMLIT_SERVER_HEADLESS: 'true' } : {}), ...(cfg.env ?? {}) }
+    return { port: cfg.port, argv, env }
   }
   const pkg = await readJson($, `${cwd}/package.json`)
   const script: string | undefined = pkg?.scripts?.dev
@@ -679,16 +694,18 @@ let devProc: AsyncGenerator<unknown, unknown> | null = null // the server Start 
 
 async function probeDev($: Engine) {
   const d = await read($, dev)
-  if (d.port === null || d.status === 'starting' || isProbing) return
+  if (d.port === null || isProbing) return
   isProbing = true
   try {
     const r = await $.http.fetch(`http://localhost:${d.port}/`)
     const error = r.status >= 500 ? firstErrorLine(r.text) : null
     const status = error ? 'error' : 'up'
     // Written only when it changed: every write redraws the strip, which would close an open hover.
-    if (d.status !== status || d.error !== error) await update($, dev, (cur): DevState => (cur.status === 'starting' ? cur : { ...cur, status, error }))
+    // An answer ends "starting" too: some servers never print a line the spawn watch knows.
+    if (d.status !== status || d.error !== error) await update($, dev, (cur): DevState => ({ ...cur, status, error }))
   } catch {
-    if (d.status !== 'down') await update($, dev, (cur): DevState => (cur.status === 'starting' ? cur : { ...cur, status: 'down' }))
+    // Not answering yet while starting is normal: only the server's exit turns it down.
+    if (d.status !== 'down' && d.status !== 'starting') await update($, dev, (cur): DevState => (cur.status === 'starting' ? cur : { ...cur, status: 'down' }))
   } finally {
     isProbing = false
   }
@@ -743,7 +760,7 @@ async function startDev($: Engine, cwd: string) {
   const found = await detectDev($, cwd)
   if (!found) return
   await update($, dev, (cur): DevState => ({ ...cur, status: 'starting', error: null }))
-  const proc = $.process.spawn({ argv: found.argv })
+  const proc = $.process.spawn({ argv: found.argv, ...(found.env ? { env: found.env } : {}) })
   devProc = proc
   void (async () => {
     try {
@@ -751,7 +768,7 @@ async function startDev($: Engine, cwd: string) {
         if ('text' in piece && /error/i.test(piece.text)) {
           await update($, dev, (cur): DevState => ({ ...cur, error: (piece.text.trim().split('\n')[0] ?? '').slice(0, 100) }))
         }
-        if ('text' in piece && /localhost:\d+|ready in|started server/i.test(piece.text)) {
+        if ('text' in piece && /(localhost|127\.0\.0\.1|0\.0\.0\.0):\d+|ready in|started server|can now view/i.test(piece.text)) {
           await update($, dev, (cur): DevState => ({ ...cur, status: 'up' }))
         }
       }
@@ -965,7 +982,8 @@ const shortAge = (ms: number) => {
     : s < 30 * 86_400 ? `${Math.floor(s / 86_400)}d` : s < 365 * 86_400 ? `${Math.floor(s / (30 * 86_400))}mo` : `${Math.floor(s / (365 * 86_400))}y`
 }
 /** Token counts as people say them: 482k, 1M, 1.2M. */
-const tokensShort = (n: number) => n >= 999_500 ? `${+(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1000)}k`
+const tokensShort = (n: number) => n >= 999_500_000 ? `${+(n / 1_000_000_000).toFixed(2)}B`
+  : n >= 999_500 ? `${+(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1000)}k`
 const hhmmAt = (ms: number) => hhmm(new Date(ms).toISOString())
 
 const hhmm = (iso: string) => {
@@ -1321,13 +1339,16 @@ async function recordReport($: Engine, add: Partial<ReportDay> & { model?: strin
     const key = reportKey(now.getFullYear())
     const year = ((await $.store.get(key)) as ReportYear | undefined) ?? {}
     const day = year[dayKey(now)] ?? EMPTY_DAY
+    const tokens = (add.input ?? 0) + (add.output ?? 0) + (add.cacheRead ?? 0) + (add.cacheWrite ?? 0)
     const models = { ...day.models }
-    if (add.model && (add.tasks || add.usd)) {
+    if (add.model && (add.tasks || add.usd || tokens)) {
       const m = models[add.model] ?? { tasks: 0, usd: 0 }
-      models[add.model] = { tasks: m.tasks + (add.tasks ?? 0), usd: m.usd + (add.usd ?? 0) }
+      models[add.model] = { tasks: m.tasks + (add.tasks ?? 0), usd: m.usd + (add.usd ?? 0), tokens: (m.tokens ?? 0) + tokens }
     }
     const projects = { ...day.projects }
     if (add.project && add.tasks) projects[add.project] = (projects[add.project] ?? 0) + add.tasks
+    const projectTokens = { ...day.projectTokens }
+    if (add.project && tokens) projectTokens[add.project] = (projectTokens[add.project] ?? 0) + tokens
     const next: ReportDay = {
       tasks: day.tasks + (add.tasks ?? 0),
       aiMs: day.aiMs + (add.aiMs ?? 0),
@@ -1340,6 +1361,7 @@ async function recordReport($: Engine, add: Partial<ReportDay> & { model?: strin
       sessions: add.session !== undefined && !day.sessions.includes(add.session) ? [...day.sessions, add.session] : day.sessions,
       models,
       projects,
+      projectTokens,
     }
     await $.store.set(key, { ...year, [dayKey(now)]: next })
   } catch {}
@@ -1757,14 +1779,15 @@ export const register: Register = on => {
     void $.session.usage().then(async usage => {
       if (usage.cost) reportedCost = await conversationCost($, usage.startedAt, usage.cost.usd)
     }).catch(() => {})
-    // A server stopped (or started) outside OneLiner shows within seconds: every 5 s while it runs, 15 s while down.
+    // A server stopped (or started) outside OneLiner shows within seconds: every 5 s while it runs
+    // or starts, 15 s while down.
     let devTicks = 0
     $.clock.every(5_000, () => {
       devTicks += 1
       void (async () => {
         const d = await read($, dev)
         if (d.port === null) return
-        if (d.status === 'up' || d.status === 'error' || devTicks % 3 === 0) await probeDev($)
+        if (d.status !== 'down' || devTicks % 3 === 0) await probeDev($)
       })()
     })
     // The helpers' timers tick every second, only while the agents panel is open and one is running.
@@ -1852,7 +1875,7 @@ export const register: Register = on => {
     if (e.agentId) {
       if (e.usage) {
         const [c, l] = await Promise.all([read($, cache), read($, limit)])
-        void recordReport($, turnTokens(e.usage, cacheTtl(c, l)))
+        void recordReport($, { ...turnTokens(e.usage, cacheTtl(c, l)), model: e.usage.model || undefined, project: cwd ? baseName(cwd) : undefined })
       }
       // A helper's own turn ends it.
       const agentId = e.agentId
@@ -2467,6 +2490,12 @@ export const register: Register = on => {
     const dropOrder = isDevActionable ? ['git', 'context', 'next', 'dev'] : ['dev', 'git', 'context', 'next']
     for (const id of dropOrder) {
       if (total(shown) <= cols) break
+      // git first shrinks to its branch (its color still says clean, dirty or broken), then goes.
+      if (id === 'git' && g.branch) {
+        const branch = g.branch.length > 16 ? `${g.branch.slice(0, 15)}…` : g.branch
+        shown = shown.map(s => (s.id === 'git' ? { ...s, text: branch, extras: undefined } : s))
+        if (total(shown) <= cols) break
+      }
       shown = shown.filter(s => s.id !== id)
     }
     if (shown.length === 0 && !isMenuOpen) return next(e) // all parts off: no strip, /strip still opens the panel
@@ -2891,23 +2920,40 @@ export const register: Register = on => {
   // ── the report pane ───────────────────────────────────────────
   on('ui.render', { component: 'Pane', requestId: REPORT_PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [tab, at] = await Promise.all([read($, reportTab), $.clock.now()])
+    const [tab, by, at] = await Promise.all([read($, reportTab), read($, reportBy), $.clock.now()])
     const width = Math.max(32, Math.min(96, ((e.props as { bodyColumns?: number }).bodyColumns ?? 72) - 4))
     const days = await reportDays($, tab, at)
     const sum = days.reduce((t, { day }) => {
       if (!day) return t
+      // The day's tokens not kept per model or project (days before v1.0.10) are split by its tasks:
+      // exact where one model or project did all of it, an estimate (~) where several shared it.
+      const dayTokens = day.input + day.output + day.cacheRead + day.cacheWrite
+      const spread = <V,>(entries: [string, V][], kept: (v: V) => number, tasks: (v: V) => number, into: Record<string, number>, guessed: Set<string>) => {
+        const rest = dayTokens - entries.reduce((n, [, v]) => n + kept(v), 0)
+        const allTasks = entries.reduce((n, [, v]) => n + tasks(v), 0)
+        const shared = entries.filter(([, v]) => tasks(v) > 0)
+        for (const [k, v] of entries) {
+          const extra = rest > dayTokens * 0.01 && allTasks > 0 ? (rest * tasks(v)) / allTasks : 0
+          into[k] = (into[k] ?? 0) + kept(v) + extra
+          if (extra > 0 && shared.length > 1) guessed.add(k)
+        }
+      }
+      const modelTokens: Record<string, number> = {}
+      spread(Object.entries(day.models), v => v.tokens ?? 0, v => v.tasks, modelTokens, t.guessed)
       for (const [m, v] of Object.entries(day.models)) {
-        const cur = t.models[m] ?? { tasks: 0, usd: 0 }
-        t.models[m] = { tasks: cur.tasks + v.tasks, usd: cur.usd + v.usd }
+        const cur = t.models[m] ?? { tasks: 0, usd: 0, tokens: 0 }
+        t.models[m] = { tasks: cur.tasks + v.tasks, usd: cur.usd + v.usd, tokens: cur.tokens + (modelTokens[m] ?? 0) }
       }
       for (const [p, n] of Object.entries(day.projects)) t.projects[p] = (t.projects[p] ?? 0) + n
+      const names = [...new Set([...Object.keys(day.projects), ...Object.keys(day.projectTokens ?? {})])]
+      spread(names.map(p => [p, p] as [string, string]), p => day.projectTokens?.[p] ?? 0, p => day.projects[p] ?? 0, t.projectTokens, t.guessedProjects)
       for (const id of day.sessions) t.sessions.add(id)
       return {
         ...t, tasks: t.tasks + day.tasks, aiMs: t.aiMs + day.aiMs, usd: t.usd + day.usd,
         tokens: t.tokens + day.input + day.output + day.cacheRead + day.cacheWrite,
         cacheRead: t.cacheRead + day.cacheRead, weighted: t.weighted + day.weighted,
       }
-    }, { tasks: 0, aiMs: 0, usd: 0, tokens: 0, cacheRead: 0, weighted: 0, sessions: new Set<number>(), models: {} as Record<string, { tasks: number; usd: number }>, projects: {} as Record<string, number> })
+    }, { tasks: 0, aiMs: 0, usd: 0, tokens: 0, cacheRead: 0, weighted: 0, sessions: new Set<number>(), models: {} as Record<string, { tasks: number; usd: number; tokens: number }>, projects: {} as Record<string, number>, projectTokens: {} as Record<string, number>, guessed: new Set<string>(), guessedProjects: new Set<string>() })
     // What the tokens read from cache would have cost at the full input price, less what they did cost:
     // 0.9 of an input token each, at the price the period's own cost and tokens work out to.
     const cacheSaved = sum.weighted > 0 ? (sum.cacheRead * 0.9 * sum.usd) / sum.weighted : 0
@@ -2919,6 +2965,10 @@ export const register: Register = on => {
     const titles = { today: "TODAY'S WORK", week: 'THIS WEEK', month: 'LAST 30 DAYS', year: `${last.getFullYear()} SO FAR` } as const
     const tabs = (['today', 'week', 'month', 'year'] as const).map(t => (
       <Button key={`rep-${t}`} variant={t === tab ? 'primary' : undefined} label={t[0]!.toUpperCase() + t.slice(1)} onPress={() => void update($, reportTab, () => t)} />
+    ))
+    // What the rows count: tasks (with the price), or tokens.
+    const byButtons = (['tasks', 'tokens'] as const).map(b => (
+      <Button key={`rep-by-${b}`} variant={b === by ? 'primary' : undefined} label={b[0]!.toUpperCase() + b.slice(1)} onPress={() => void update($, reportBy, () => b)} />
     ))
     // A line of exactly `w` cells (or the rest of the row): drawn long, clipped by its Box, so it never wraps
     // where the font's dashes are not one cell wide (the desktop app).
@@ -2951,9 +3001,20 @@ export const register: Register = on => {
     ].slice(0, tileCount)
     const barMax = Math.max(8, width - 40)
     const bar = (share: number, color: string) => line(`bar-${color}-${share}`, Math.max(1, Math.round(share * barMax)), '━', color)
-    const models = Object.entries(sum.models).sort((a, b) => b[1].tasks - a[1].tasks || b[1].usd - a[1].usd).slice(0, 5)
-    const projects = Object.entries(sum.projects).sort((a, b) => b[1] - a[1]).slice(0, 5)
-    const topTasks = Math.max(1, ...models.map(([, v]) => v.tasks), ...projects.map(([, n]) => n))
+    const isByTokens = by === 'tokens'
+    const models = Object.entries(sum.models)
+      .sort((a, b) => (isByTokens ? b[1].tokens - a[1].tokens : 0) || b[1].tasks - a[1].tasks || b[1].usd - a[1].usd).slice(0, 5)
+    const projectNames = [...new Set([...Object.keys(sum.projects), ...Object.keys(sum.projectTokens)])]
+    const projects = projectNames
+      .map(p => [p, { tasks: sum.projects[p] ?? 0, tokens: sum.projectTokens[p] ?? 0 }] as const)
+      .filter(([, v]) => (isByTokens ? v.tokens || v.tasks : v.tasks))
+      .sort((a, b) => (isByTokens ? b[1].tokens - a[1].tokens : 0) || b[1].tasks - a[1].tasks).slice(0, 5)
+    const topTasks = Math.max(1, ...models.map(([, v]) => v.tasks), ...projects.map(([, v]) => v.tasks))
+    const topTokens = Math.max(1, ...models.map(([, v]) => v.tokens), ...projects.map(([, v]) => v.tokens))
+    const share = (v: { tasks: number; tokens: number }) => (isByTokens ? v.tokens / topTokens : v.tasks / topTasks)
+    const tasksText = (n: number) => `${n} task${n === 1 ? '' : 's'}`
+    const tokensText = (n: number, isGuessed: boolean) => (n > 0 ? `${isGuessed ? '~' : ''}${tokensShort(n)} tokens` : 'no tokens')
+    const isAnyGuessed = models.some(([m]) => sum.guessed.has(m)) || projects.some(([p]) => sum.guessedProjects.has(p))
     const row = (key: string, color: string, name: string, share: number, right: string) => (
       <Box key={key} flexDirection="row" gap={1}>
         <Text color={color}>●</Text>
@@ -2992,7 +3053,10 @@ export const register: Register = on => {
     const isEmpty = sum.tasks === 0 && sum.usd === 0
     return (
       <Box flexDirection="column" width={width}>
-        <Box flexDirection="row" gap={1} flexWrap="wrap">{tabs}</Box>
+        <Box flexDirection="row" justifyContent="space-between" flexWrap="wrap">
+          <Box flexDirection="row" gap={1} flexWrap="wrap">{tabs}</Box>
+          <Box flexDirection="row" gap={1}>{byButtons}</Box>
+        </Box>
         <Box flexDirection="row" justifyContent="space-between" marginTop={1}>
           <Text bold>{titles[tab]}</Text>
           <Text dimColor>{dateLabel}</Text>
@@ -3014,9 +3078,14 @@ export const register: Register = on => {
               `${tokensShort(sum.tokens)} tokens`,
             ].filter(Boolean).join(' · ')}</Text>
             {models.length > 0 && heading('WHO DID THE WORK')}
-            {models.map(([m, v], i) => row(`rep-m-${i}`, REPORT_COLORS[i % REPORT_COLORS.length]!, shortModel(m), v.tasks / topTasks, `${v.tasks} task${v.tasks === 1 ? '' : 's'} · ${usdShort(v.usd)}`))}
+            {models.map(([m, v], i) => row(`rep-m-${i}`, REPORT_COLORS[i % REPORT_COLORS.length]!, shortModel(m), share(v),
+              `${isByTokens ? tokensText(v.tokens, sum.guessed.has(m)) : tasksText(v.tasks)} · ${usdShort(v.usd)}`))}
             {projects.length > 0 && heading('WHERE IT WENT')}
-            {projects.map(([p, n], i) => row(`rep-p-${i}`, REPORT_COLORS[(i + 2) % REPORT_COLORS.length]!, baseName(p), n / topTasks, `${n} task${n === 1 ? '' : 's'}`))}
+            {projects.map(([p, v], i) => row(`rep-p-${i}`, REPORT_COLORS[(i + 2) % REPORT_COLORS.length]!, baseName(p), share(v),
+              isByTokens ? tokensText(v.tokens, sum.guessedProjects.has(p)) : tasksText(v.tasks)))}
+            {isByTokens && isAnyGuessed && (
+              <Text dimColor>~ estimated: before v1.0.10 a day's tokens were kept as one total, split here by its tasks.</Text>
+            )}
           </Box>
         )}
         {heading(tab === 'year' ? `${last.getFullYear()} BY MONTH` : tab === 'month' ? 'LAST 30 DAYS' : 'LAST 7 DAYS')}
