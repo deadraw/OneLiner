@@ -15,6 +15,8 @@ const CACHE_RED_SHARE = 0.25
 // Context window: ≤49 green, 50–70 yellow, ≥71 red (+ Compact).
 const CONTEXT_YELLOW_PCT = 50
 const CONTEXT_RED_PCT = 71
+// Below this a handoff saves little: the conversation is still small enough to carry on, or to compact cheaply.
+const HANDOFF_MIN_CTX_PCT = 25
 // Cache running out: offer Compact only from this context fill; below it, letting the cache rebuild is cheaper.
 const CACHE_COMPACT_MIN_PCT = 30
 // Model-switch hint on the cache segment: wide strips, warm cache, big context only.
@@ -566,7 +568,7 @@ async function prText($: Engine, base: string): Promise<{ title: string; body: s
 // ── loading the strip, and reloading it while developing ────────
 
 /** For the credit line. Raised with plugin.json and marketplace.json at every release. */
-const VERSION = '1.0.10'
+const VERSION = '1.0.11'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: Engine, cwd: string, at: number) {
@@ -604,6 +606,7 @@ async function reloadStrip($: Engine, cwd: string, isFresh: boolean) {
       $.store.delete(storeKey(cwd)),
       $.store.delete(briefCacheKey(cwd)),
       update($, cache, (c): CacheState => ({ ...c, lastTurnAt: null, resetReason: null })),
+      update($, context, (c): ContextState => ({ ...c, percent: null, tokens: null })),
       update($, brief, () => null),
     ])
   }
@@ -794,13 +797,21 @@ async function reportRebuild($: Engine) {
 
 // ── limits + cache ──────────────────────────────────────────────
 
+/** The window reading from before the last compaction: usage() repeats it until a new response measures the window. */
+let preCompactTokens: number | null = null
+
 async function refreshLimit($: Engine) {
   try {
     const usage = await $.session.usage()
     const ctx = usage.context
     // Context first, on its own: the saved-cost lookup must never hold it back (or drop it when it fails).
     const percent = ctx.percent ?? (ctx.tokens != null && ctx.window ? (ctx.tokens / ctx.window) * 100 : null)
-    await update($, context, c => ({ percent, tokens: ctx.tokens ?? null, window: ctx.window, usd: c.usd ?? usage.cost?.usd ?? null }))
+    // Right after a compaction no response has measured the window yet: keep the compaction's own count until one does.
+    const isStale = (percent === null && ctx.tokens == null) || (preCompactTokens !== null && ctx.tokens === preCompactTokens)
+    if (!isStale) preCompactTokens = null
+    await update($, context, c => isStale
+      ? { ...c, window: ctx.window ?? c.window, usd: c.usd ?? usage.cost?.usd ?? null }
+      : { percent, tokens: ctx.tokens ?? null, window: ctx.window, usd: c.usd ?? usage.cost?.usd ?? null })
     if (usage.cost) {
       const cost = usage.cost
       void conversationCost($, usage.startedAt, cost.usd)
@@ -1704,8 +1715,19 @@ async function writeCompactNote($: Engine, cwd: string): Promise<boolean> {
 }
 
 /** After compacting: the cache starts cold, and the brief shows Goal / Done / Next from the fresh note (no extra call). */
-async function afterCompact($: Engine, cwd: string, messages: readonly { text: string }[], hasNote: boolean) {
-  await update($, cache, c => ({ ...c, lastTurnAt: null, readPercent: null }))
+async function afterCompact($: Engine, cwd: string, messages: readonly { text: string }[], hasNote: boolean, tokensAfter?: number) {
+  // Cold, not unknown: the strip keeps the cache part and says the next message writes it anew.
+  await update($, cache, c => ({ ...c, lastTurnAt: 0, readPercent: null, resetReason: null }))
+  // The status line keeps the last response's count until the next one: count the compacted conversation here (locally, free).
+  try {
+    const u = await $.session.usage({ breakdown: 'summary' })
+    const tokens = tokensAfter ?? u.context.breakdown?.totalTokens
+    if (tokens !== undefined) {
+      preCompactTokens = u.context.tokens ?? null
+      const window = u.context.window || null
+      await update($, context, c => ({ ...c, tokens, window: window ?? c.window, percent: (window ?? c.window) ? (tokens / (window ?? c.window)!) * 100 : c.percent }))
+    }
+  } catch {}
   void refreshLimit($)
   if (!cwd) return
   const stored = (await $.store.get(storeKey(cwd))) as Stored | undefined
@@ -2027,7 +2049,7 @@ export const register: Register = on => {
     const isMain = !e.agentId && e.trigger !== 'precompute'
     const hasNote = isMain ? await writeCompactNote($, cwd).catch(() => false) : false
     const result = await next(e)
-    if (isMain && result.skip === undefined) await afterCompact($, cwd, result.messages, hasNote)
+    if (isMain && result.skip === undefined) await afterCompact($, cwd, result.messages, hasNote, result.tokensAfter)
     return result
   })
 
@@ -2260,12 +2282,12 @@ export const register: Register = on => {
     type Seg = {
       id: string; text: string; color?: string; dim?: boolean
       extras?: { text: string; color?: string; dim?: boolean; drop?: number }[] // more numbers, each with its own color; `drop`: lower goes first when narrow
-      button?: { label: string; onPress: () => void }
+      button?: { label: string; onPress: () => void; plain?: true } // plain: an icon without the button frame
       detail?: string // revealed after the text while the pointer is over the part (desktop)
       detailMode?: 'push' | 'over' // push the parts to its right aside, or cover them to the strip's end
       buttons?: { label: string; onPress: () => void }[] // more buttons after `button`
-      detailButtons?: { label: string; onPress: () => void }[] // actions offered only on hover
-      toggle?: { label: string; onPress: () => void } // a plain ▾ / ▴ right after the text (git's changes panel)
+      detailButtons?: { label: string; onPress: () => void; plain?: true }[] // actions offered only on hover
+      toggle?: { label: string; onPress: () => void } // a plain ▾ / ▴ right after the text
       isActionFirst?: boolean // its buttons go before the text, outside its hover (git's ▴, dev's Start)
       isDetailShown?: boolean // the detail stays out, no hover needed (git's, while the changes panel is open)
     }
@@ -2365,9 +2387,9 @@ export const register: Register = on => {
         extras: week !== null
           ? [{ text: ` · 7d ${week}%`, color: week >= LIMIT_RED_PCT ? 'error' : 'warning', drop: 3 }]
           : undefined,
-        // Close to the wall: offer to write the handoff while there's still room to.
-        button: (tone === 'error' || (fullAt !== null && fullAt - at < 60 * 60_000)) && !writingHandoff
-          ? { label: 'Handoff', onPress: () => void writeHandoff($, cwd) }
+        // Close to the wall: offer to write the handoff while there's still room to, unless the conversation is still small.
+        button: (tone === 'error' || (fullAt !== null && fullAt - at < 60 * 60_000)) && !writingHandoff && (ctx.percent ?? 0) >= HANDOFF_MIN_CTX_PCT
+          ? { label: '📝', plain: true as const, onPress: () => void writeHandoff($, cwd) }
           : undefined,
         detail: [
           // Helpers each run a context of their own: say why the limit climbs while they work.
@@ -2397,8 +2419,8 @@ export const register: Register = on => {
         ].filter(Boolean).join(' '),
         // On hover at any fill: the same two, as icons (handoff, compact).
         detailButtons: isContextRed ? undefined : [
-          ...(writingHandoff ? [] : [{ label: '📝', onPress: () => void writeHandoff($, cwd) }]),
-          { label: '♻️', onPress: () => void compactNow($) },
+          ...(writingHandoff ? [] : [{ label: '📝', plain: true as const, onPress: () => void writeHandoff($, cwd) }]),
+          { label: '♻️', plain: true as const, onPress: () => void compactNow($) },
         ],
         detailMode: 'push',
       })
@@ -2471,7 +2493,7 @@ export const register: Register = on => {
 
     // Narrow: first the optional extras (switch hint, then % read, then 7d), then whole parts:
     // dev, git, context, next. Limit + cache always stay.
-    const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + 5 : 0)
+    const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + (s.button.plain ? 2 : 5) : 0)
       + (s.toggle ? 2 : 0)
       + (s.buttons ?? []).reduce((w, b) => w + b.label.length + 5, 0) + 3
     // ◈ (and its count) sits on the right with next: its room counts too.
@@ -2520,7 +2542,7 @@ export const register: Register = on => {
             <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />
           </Box>
         )}
-        {s.button && !s.toggle && <Button key={`${s.id}-btn`} label={s.button.label} onPress={s.button.onPress} />}
+        {s.button && !s.toggle && <Button key={`${s.id}-btn`} plain={s.button.plain} label={s.button.label} onPress={s.button.onPress} />}
         {s.toggle && !s.button && <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />}
         {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
       </Box>
@@ -2551,7 +2573,7 @@ export const register: Register = on => {
                   // Pushes the parts to its right aside while hovered.
                   : <Box display={s.isDetailShown ? 'flex' : 'none'} gap={1} hover={s.isDetailShown ? undefined : { display: 'flex' }}>
                       <Text dimColor wrap="truncate">{` · ${s.detail}`}</Text>
-                      {(s.detailButtons ?? []).map((b, i) => <Button key={`${s.id}-hover-btn-${i}`} label={b.label} onPress={b.onPress} />)}
+                      {(s.detailButtons ?? []).map((b, i) => <Button key={`${s.id}-hover-btn-${i}`} plain={b.plain} label={b.label} onPress={b.onPress} />)}
                     </Box>
               )}
             </Box>

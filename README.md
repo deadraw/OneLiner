@@ -48,7 +48,7 @@ Working with Claude Code all day, the same things keep costing time:
 | **dev** | your local dev server | running | - | build error (gray when off, + **Start**) |
 | **⇡ upgrade** | turns the prompt you are typing into a better one, in a side pane ([more ↓](#prompt-upgrade)) | - | - | - |
 | **◈ agents** | helpers Claude runs for this task: how many are working, or the number you set (`◈ 3`) | helpers working | - | - |
-| **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **Handoff** button) |
+| **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **📝** handoff, once ctx is 25% or more) |
 | **ctx** | context window fill and tokens | ≤ 49% | 50–70% | ≥ 71% (+ **Handoff** and **Compact** buttons) |
 | **cache** | minutes until the prompt cache expires · % of the last turn read from cache | ≥ half the lifetime left | 25–50% left | < 25% left, cold, or reset (+ **Compact** from 30% context) |
 | **next** | options from Claude's last answer + ideas on request | | | |
@@ -143,7 +143,7 @@ It counts from the moment you install 1.0.8; nothing before that is known. The f
 | Command | Does |
 |---|---|
 | `/ship` | Commit (and optionally push). Runs your build first, writes the commit message, asks before pushing. Refuses during a conflict. |
-| `/handoff` | Writes or updates your `CURRENT.md` / `HANDOFF.md` from the conversation, keeping its structure; any conversation works, coding or not. A row under the strip asks **Write** / **Cancel**, then offers **Clear & continue** (clears the chat; Claude reads the handoff, tells you where you left off and proposes next steps, then waits for you), **Clear**, or **Not now**. Keeps a backup of the previous file. Also on the **Handoff** button (red ctx, or near the 5-hour wall) and **📝** in the ctx hover. |
+| `/handoff` | Writes or updates your `CURRENT.md` / `HANDOFF.md` from the conversation, keeping its structure; any conversation works, coding or not. A row under the strip asks **Write** / **Cancel**, then offers **Clear & continue** (clears the chat; Claude reads the handoff, tells you where you left off and proposes next steps, then waits for you), **Clear**, or **Not now**. Keeps a backup of the previous file. Also on the **Handoff** button (red ctx), **📝** beside the 5h limit (near the wall, once ctx is 25% or more) and **📝** in the ctx hover. |
 | `/limits` | A chart of the current 5-hour window: usage so far, pace, forecast, reset time, weekly window. Run it again to close it. |
 | `/report` | The work report: AI time, sessions, API price, cache saved, models and projects, by day, week, month or year. Run it again to close it. |
 | `/brief` | Where you left off in this project: **Goal**, **Done** and up to three **Next** steps, each on its own line in full and one click (or key 1-3) into the prompt box; plus branch, unpushed and changed files and the last commit. Also opens by itself after 6+ hours away and after a compaction. |
