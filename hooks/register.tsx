@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, RenderElement } from 'claude-code'
 
 import type { AgentsState, ReportDay, UpgradeQuestion, UpgradeState, Brief, HandoffStep, CacheState, ContextState, DevState, DiffView, FileStat, GitState, Helper, LimitState, NextState } from '../types'
 
@@ -243,9 +243,39 @@ function lineDiff(before: string, after: string): { added: number; removed: numb
 
 // ── git ─────────────────────────────────────────────────────────
 
+/** The folder git runs in, found once per project root. */
+let gitFolder: { root: string; dir: string } | null = null
+
+/**
+ * The session's project root, or, when that is no repository, the one repository directly
+ * beneath it (a session opened on a folder that holds the project: AI-Games/kingshot).
+ */
+async function gitDir($: Engine): Promise<string | undefined> {
+  const root = await $.session.root().catch(() => undefined)
+  if (!root) return undefined
+  if (gitFolder?.root === root) return gitFolder.dir
+  let dir = root
+  const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd: root, timeoutMs: 15_000 }).catch(() => null)
+  if (top && top.exitCode !== 0 && /not a git repository/i.test(top.stderr)) {
+    const entries = await $.fs.list(root).catch(() => [])
+    const repos: string[] = []
+    for (const x of entries) {
+      if (x.kind === 'dir' && !x.name.startsWith('.') && await $.fs.exists(`${root}/${x.name}/.git`)) repos.push(`${root}/${x.name}`)
+    }
+    if (repos.length === 1) dir = repos[0]!
+  } else if (!top || top.exitCode !== 0) {
+    return root // git itself failed (a timeout, a slow start): look again next time
+  }
+  gitFolder = { root, dir }
+  return dir
+}
+
 async function runGit($: Engine, args: string[], timeoutMs = 15_000) {
+  // Always in the project's folder: a hook run for a subagent otherwise runs in the
+  // subagent's folder, and one outside the repo would take the git part off the strip.
+  const cwd = await gitDir($)
   // GIT_TERMINAL_PROMPT=0: a remote that wants credentials fails fast instead of hanging.
-  return $.process.run(['git', ...args], { timeoutMs, env: { GIT_TERMINAL_PROMPT: '0' } })
+  return $.process.run(['git', ...args], { cwd, timeoutMs, env: { GIT_TERMINAL_PROMPT: '0' } })
 }
 
 /** Downloads remote refs only (never touches your files), so "behind" / "diverged" stay true. */
@@ -568,7 +598,7 @@ async function prText($: Engine, base: string): Promise<{ title: string; body: s
 // ── loading the strip, and reloading it while developing ────────
 
 /** For the credit line. Raised with plugin.json and marketplace.json at every release. */
-const VERSION = '1.0.11'
+const VERSION = '1.0.12'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: Engine, cwd: string, at: number) {
@@ -2258,7 +2288,12 @@ export const register: Register = on => {
   // ── the strip ─────────────────────────────────────────────────
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+    // A survey (on a desktop, also the card asking what to do next) holds the band: it stays
+    // on top and the strip draws under it, instead of the strip going away until it's answered.
+    const survey = e.props.hasSurvey ? await next(e) : null
+    const { Box: Blank } = $.ui.resolve(e)
+    const pass = async (): Promise<RenderElement> => survey ? <Blank /> : next(e)
+    const strip = await (async (): Promise<RenderElement> => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const [hiddenParts, isMenuOpen, writingHandoff] = await Promise.all([read($, hidden), read($, stripMenu), read($, isWritingHandoff)])
     let [g, d, l, c, ctx, at, shipping, n] = await Promise.all([
@@ -2285,7 +2320,7 @@ export const register: Register = on => {
       button?: { label: string; onPress: () => void; plain?: true } // plain: an icon without the button frame
       detail?: string // revealed after the text while the pointer is over the part (desktop)
       detailMode?: 'push' | 'over' // push the parts to its right aside, or cover them to the strip's end
-      buttons?: { label: string; onPress: () => void }[] // more buttons after `button`
+      buttons?: { label: string; onPress: () => void; plain?: true }[] // more buttons after `button`
       detailButtons?: { label: string; onPress: () => void; plain?: true }[] // actions offered only on hover
       toggle?: { label: string; onPress: () => void } // a plain ▾ / ▴ right after the text
       isActionFirst?: boolean // its buttons go before the text, outside its hover (git's ▴, dev's Start)
@@ -2354,7 +2389,7 @@ export const register: Register = on => {
       const s = map[d.status]
       segs.push({
         id: 'dev', text: s.text, color: 'color' in s ? s.color : undefined, dim: 'dim' in s && s.dim,
-        button: d.status === 'down' ? { label: 'Start', onPress: () => void startDev($, cwd) } : undefined,
+        button: d.status === 'down' ? { label: 'Start', plain: true as const, onPress: () => void startDev($, cwd) } : undefined,
         isActionFirst: true,
         detail: d.status === 'error' ? (d.error ?? 'see the dev server output')
           : d.status === 'up' ? `http://localhost:${d.port}`
@@ -2362,8 +2397,8 @@ export const register: Register = on => {
           : d.status === 'down' ? `localhost:${d.port} is not running` : '',
         // While it runs: ■ stops it, ↻ stops and starts it again.
         detailButtons: d.status === 'up' || d.status === 'error' || d.status === 'starting' ? [
-          { label: '■', onPress: () => void stopDev($, cwd) },
-          { label: '↻', onPress: () => void restartDev($, cwd) },
+          { label: '■', plain: true as const, onPress: () => void stopDev($, cwd) },
+          { label: '↻', plain: true as const, onPress: () => void restartDev($, cwd) },
         ] : undefined,
         detailMode: 'push',
       })
@@ -2411,8 +2446,8 @@ export const register: Register = on => {
         id: 'context',
         text: `ctx ${pct}%${k}`,
         color: pct >= CONTEXT_RED_PCT ? 'error' : pct >= CONTEXT_YELLOW_PCT ? 'warning' : 'success',
-        button: isContextRed && !writingHandoff ? { label: 'Handoff', onPress: () => void writeHandoff($, cwd) } : undefined,
-        buttons: isContextRed ? [{ label: 'Compact', onPress: () => void compactNow($) }] : undefined,
+        button: isContextRed && !writingHandoff ? { label: '📝', plain: true as const, onPress: () => void writeHandoff($, cwd) } : undefined,
+        buttons: isContextRed ? [{ label: '♻️', plain: true as const, onPress: () => void compactNow($) }] : undefined,
         detail: [
           `${100 - pct}% free`,
           ctx.window ? `of ${tokensShort(ctx.window)}` : '',
@@ -2453,7 +2488,7 @@ export const register: Register = on => {
             ? [{ text: ` · switch re-sends ${tokensShort(ctx.tokens ?? 0)}`, dim: true, drop: 1 }] : []),
         ],
         // On a small context, re-sending it costs less than a compaction (which reads it all and writes a summary).
-        button: timeTone === 'error' && !isContextRed && !c.resetReason && (ctx.percent ?? 0) >= CACHE_COMPACT_MIN_PCT ? { label: 'Compact', onPress: () => void compactNow($) } : undefined,
+        button: timeTone === 'error' && !isContextRed && !c.resetReason && (ctx.percent ?? 0) >= CACHE_COMPACT_MIN_PCT ? { label: '♻️', plain: true as const, onPress: () => void compactNow($) } : undefined,
         detail: [
           cold || c.resetReason
             ? `the next message re-sends ${ctx.tokens ? `~${tokensShort(ctx.tokens)}` : 'the conversation'} at full price`
@@ -2495,7 +2530,7 @@ export const register: Register = on => {
     // dev, git, context, next. Limit + cache always stay.
     const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + (s.button.plain ? 2 : 5) : 0)
       + (s.toggle ? 2 : 0)
-      + (s.buttons ?? []).reduce((w, b) => w + b.label.length + 5, 0) + 3
+      + (s.buttons ?? []).reduce((w, b) => w + b.label.length + (b.plain ? 2 : 5), 0) + 3
     // ◈ (and its count) sits on the right with next: its room counts too.
     const agentsWidth = (hiddenParts.includes('agents') ? 0 : 4 + (runningHelpers > 0 || ag.cap !== null ? 6 : 0))
       + (hiddenParts.includes('upgrade') ? 0 : 4)
@@ -2520,7 +2555,7 @@ export const register: Register = on => {
       }
       shown = shown.filter(s => s.id !== id)
     }
-    if (shown.length === 0 && !isMenuOpen) return next(e) // all parts off: no strip, /strip still opens the panel
+    if (shown.length === 0 && !isMenuOpen) return pass() // all parts off: no strip, /strip still opens the panel
 
     // One Text per character, each a step along the gradient (surfaces have no gradient style).
     const gradient = (text: string, from: string, to: string) => {
@@ -2544,23 +2579,44 @@ export const register: Register = on => {
         )}
         {s.button && !s.toggle && <Button key={`${s.id}-btn`} plain={s.button.plain} label={s.button.label} onPress={s.button.onPress} />}
         {s.toggle && !s.button && <Button key={`${s.id}-toggle`} plain label={s.toggle.label} onPress={s.toggle.onPress} />}
-        {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} label={b.label} onPress={b.onPress} />)}
+        {(s.buttons ?? []).map((b, i) => <Button key={`${s.id}-btn-${i}`} plain={b.plain} label={b.label} onPress={b.onPress} />)}
       </Box>
     )
     // Segments on the left; the next button pinned to the right edge.
     const nextSeg = shown.find(s => s.id === 'next')
     const leftSegs = shown.filter(s => s.id !== 'next')
+    // The room a part's hover detail has: what's left after the parts before it, itself and the right side.
+    const detailRoom = (i: number) => {
+      const s = leftSegs[i]!
+      const before = leftSegs.slice(0, i + 1).reduce((n, x) => n + width(x), 0)
+      const buttons = (s.detailButtons ?? []).reduce((n, b) => n + b.label.length + (b.plain ? 3 : 6), 0)
+      return cols - agentsWidth - (nextSeg ? width(nextSeg) : 0) - before - buttons - 1
+    }
+    // A detail wider than its room slides (marquee.tsx) instead of being cut off.
+    const surfaceEls = $.ui.resolve(e)
+    const Client = 'Client' in surfaceEls ? surfaceEls.Client : undefined
+    const detailText = (s: Seg, i: number) => {
+      const text = ` · ${s.detail}`
+      // The last part's detail takes the free room to its right and measures it itself (a desktop
+      // draws text narrower than a cell, so a count from the left comes out short).
+      if (Client && i === leftSegs.length - 1) return <Client key={`${s.id}-marquee`} module="./marquee.tsx" width="100%" props={{ text, dim: true }} />
+      const room = detailRoom(i)
+      return Client && room >= 8 && text.length > room
+        ? <Client key={`${s.id}-marquee`} module="./marquee.tsx" width={room} props={{ text, dim: true }} />
+        : <Text dimColor wrap="truncate">{text}</Text>
+    }
     const strip = (
       <Box flexDirection="row" width={cols} justifyContent="space-between">
         {/* Clipped at its edge: a long hover detail pushes the parts after it out of view, never into "next". */}
-        <Box flexDirection="row" flexShrink={1} overflow="hidden">
+        <Box flexDirection="row" flexShrink={1} flexGrow={1} overflow="hidden">
         {leftSegs.map((s, i) => (
           // No gaps between parts: each part's hover area runs up to the next one, so crossing never drops the details.
-          <Box key={s.id} flexDirection="row" gap={1} paddingRight={1}>
+          // The last one grows into the free room, which its hover detail can then fill.
+          <Box key={s.id} flexDirection="row" gap={1} paddingRight={1} flexGrow={i === leftSegs.length - 1 ? 1 : 0}>
             {i > 0 && <Text dimColor>│</Text>}
             {s.isActionFirst && actsOf(s)}
             {/* Keyed: the hover scope is the text alone, so ▾ and the buttons beside it take a click without the details opening. */}
-            <Box key={`${s.id}-main`} flexDirection="row">
+            <Box key={`${s.id}-main`} flexDirection="row" flexGrow={i === leftSegs.length - 1 ? 1 : 0}>
               {s.text !== '' && <Text color={s.color} dimColor={s.dim} wrap="truncate">{s.text}</Text>}
               {(s.extras ?? []).map(x => <Text color={x.color} dimColor={x.dim} wrap="truncate">{x.text}</Text>)}
               {!s.isActionFirst && actsOf(s)}
@@ -2571,8 +2627,8 @@ export const register: Register = on => {
                       <Text dimColor wrap="truncate">{` · ${s.detail}`}</Text>
                     </Box>
                   // Pushes the parts to its right aside while hovered.
-                  : <Box display={s.isDetailShown ? 'flex' : 'none'} gap={1} hover={s.isDetailShown ? undefined : { display: 'flex' }}>
-                      <Text dimColor wrap="truncate">{` · ${s.detail}`}</Text>
+                  : <Box display={s.isDetailShown ? 'flex' : 'none'} gap={1} flexGrow={i === leftSegs.length - 1 ? 1 : 0} hover={s.isDetailShown ? undefined : { display: 'flex' }}>
+                      {detailText(s, i)}
                       {(s.detailButtons ?? []).map((b, i) => <Button key={`${s.id}-hover-btn-${i}`} plain={b.plain} label={b.label} onPress={b.onPress} />)}
                     </Box>
               )}
@@ -2895,6 +2951,14 @@ export const register: Register = on => {
           </Box>
         </Box>
       </Box>
+    )
+    })()
+    if (!survey) return strip
+    return (
+      <Blank flexDirection="column">
+        {survey}
+        {strip}
+      </Blank>
     )
   })
 
