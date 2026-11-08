@@ -111,32 +111,6 @@ export type AgentsState = {
   helpers: Helper[]
 }
 
-/**
- * One day of the work report, in local time: what Claude did and what it would have cost on the API.
- * Saved per year in $.store (`report:2026`), keyed by `MM-DD`.
- */
-export type ReportDay = {
-  /** Typed prompts that finished with an answer. */
-  tasks: number
-  /** How long Claude worked on them: the main turns' real length, in ms. */
-  aiMs: number
-  /** What the work cost at API prices, as Claude Code prices each response (helpers included). */
-  usd: number
-  input: number
-  output: number
-  cacheRead: number
-  cacheWrite: number
-  /** The tokens weighted by their API price ratios (input 1, output 5, cache write 1.25 or 2, cache read 0.1). */
-  weighted: number
-  /** Conversations worked in that day, by their first launch. */
-  sessions: number[]
-  /** By model: its tasks, its cost and (since v1.0.10) its tokens, helpers' included. */
-  models: Record<string, { tasks: number; usd: number; tokens?: number }>
-  projects: Record<string, number>
-  /** Tokens by project, helpers' included (since v1.0.10). */
-  projectTokens?: Record<string, number>
-}
-
 /** One question Prompt Upgrade asks: its options, and the answer (null: not yet; '' skipped). */
 export type UpgradeQuestion = { text: string; options: string[]; answer: string | null; isTyping: boolean }
 

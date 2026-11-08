@@ -1,7 +1,48 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren, RenderElement } from 'claude-code'
+import type { EngineInterface, PluginState, Register, RenderChildren, RenderElement } from 'claude-code'
 
-import type { AgentsState, ReportDay, UpgradeQuestion, UpgradeState, Brief, HandoffStep, CacheState, ContextState, DevState, DiffView, FileStat, GitState, Helper, LimitState, NextState } from '../types'
+// Named from the state contract, so the module never imports the file that declares it.
+type OneLinerState = PluginState['oneliner']
+type GitState = OneLinerState['git']
+type DevState = OneLinerState['dev']
+type LimitState = OneLinerState['limit']
+type CacheState = OneLinerState['cache']
+type ContextState = OneLinerState['context']
+type NextState = OneLinerState['next']
+type AgentsState = OneLinerState['agents']
+type UpgradeState = OneLinerState['upgrade']
+type Brief = NonNullable<OneLinerState['brief']>
+type DiffView = NonNullable<OneLinerState['diffView']>
+type HandoffStep = NonNullable<OneLinerState['handoffStep']>
+type FileStat = NonNullable<GitState['stats']>[number]
+type Helper = AgentsState['helpers'][number]
+type UpgradeQuestion = UpgradeState['questions'][number]
+
+/**
+ * One day of the work report, in local time: what Claude did and what it would have cost on the API.
+ * Saved per year in $.store (`report:2026`), keyed by `MM-DD`.
+ */
+type ReportDay = {
+  /** Typed prompts that finished with an answer. */
+  tasks: number
+  /** How long Claude worked on them: the main turns' real length, in ms. */
+  aiMs: number
+  /** What the work cost at API prices, as Claude Code prices each response (helpers included). */
+  usd: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  /** The tokens weighted by their API price ratios (input 1, output 5, cache write 1.25 or 2, cache read 0.1). */
+  weighted: number
+  /** Conversations worked in that day, by their first launch. */
+  sessions: number[]
+  /** By model: its tasks, its cost and (since v1.0.10) its tokens, helpers' included. */
+  models: Record<string, { tasks: number; usd: number; tokens?: number }>
+  projects: Record<string, number>
+  /** Tokens by project, helpers' included (since v1.0.10). */
+  projectTokens?: Record<string, number>
+}
 
 const CACHE_TTL_MIN = 60 // subscription default
 const CACHE_TTL_OVERAGE_MIN = 5 // extra usage / reported 5m
@@ -598,7 +639,7 @@ async function prText($: Engine, base: string): Promise<{ title: string; body: s
 // ── loading the strip, and reloading it while developing ────────
 
 /** For the credit line. Raised with plugin.json and marketplace.json at every release. */
-const VERSION = '1.0.12'
+const VERSION = '1.0.13'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: Engine, cwd: string, at: number) {
@@ -2593,17 +2634,20 @@ export const register: Register = on => {
       return cols - agentsWidth - (nextSeg ? width(nextSeg) : 0) - before - buttons - 1
     }
     // A detail wider than its room slides (marquee.tsx) instead of being cut off.
-    const surfaceEls = $.ui.resolve(e)
-    const Client = 'Client' in surfaceEls ? surfaceEls.Client : undefined
+    const slidingDetail = (s: Seg, text: string, room: number | '100%') => {
+      if (e.surface !== 'terminal' && e.surface !== 'desktop') return null
+      const { Client } = $.ui.resolve(e)
+      return <Client key={`${s.id}-marquee`} module="./marquee.tsx" width={room} props={{ text, dim: true }} />
+    }
     const detailText = (s: Seg, i: number) => {
       const text = ` · ${s.detail}`
+      const room = detailRoom(i)
       // The last part's detail takes the free room to its right and measures it itself (a desktop
       // draws text narrower than a cell, so a count from the left comes out short).
-      if (Client && i === leftSegs.length - 1) return <Client key={`${s.id}-marquee`} module="./marquee.tsx" width="100%" props={{ text, dim: true }} />
-      const room = detailRoom(i)
-      return Client && room >= 8 && text.length > room
-        ? <Client key={`${s.id}-marquee`} module="./marquee.tsx" width={room} props={{ text, dim: true }} />
-        : <Text dimColor wrap="truncate">{text}</Text>
+      const slide = i === leftSegs.length - 1 ? slidingDetail(s, text, '100%')
+        : room >= 8 && text.length > room ? slidingDetail(s, text, room)
+        : null
+      return slide ?? <Text dimColor wrap="truncate">{text}</Text>
     }
     const strip = (
       <Box flexDirection="row" width={cols} justifyContent="space-between">
