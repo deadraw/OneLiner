@@ -142,7 +142,7 @@ It counts from the moment you install 1.0.8; nothing before that is known. The f
 
 | Command | Does |
 |---|---|
-| `/ship` | Commit (and optionally push). Runs your build first, writes the commit message, asks before pushing. Refuses during a conflict. |
+| `/shipit` | Commit (and optionally push). Runs your build first, writes the commit message, asks before pushing. Refuses during a conflict. |
 | `/handoff` | Writes or updates your `CURRENT.md` / `HANDOFF.md` from the conversation, keeping its structure; any conversation works, coding or not. A row under the strip asks **Write** / **Cancel**, then offers **Clear & continue** (clears the chat; Claude reads the handoff, tells you where you left off and proposes next steps, then waits for you), **Clear**, or **Not now**. Keeps a backup of the previous file. Also on **📝** beside red ctx, **📝** beside the 5h limit (near the wall, once ctx is 25% or more) and **📝** in the ctx hover. |
 | `/limits` | A chart of the current 5-hour window: usage so far, pace, forecast, reset time, weekly window. Run it again to close it. |
 | `/report` | The work report: AI time, sessions, API price, cache saved, models and projects, by day, week, month or year. Run it again to close it. |
@@ -251,7 +251,7 @@ Almost nothing. Everything on the strip is read from data Claude Code already ha
 | `/brief` | free after a compaction (it reads the fresh handoff note); otherwise one short Claude Sonnet call, reused until you send something new |
 | `✦ 3 more ideas` | one small question; cheap from a warm cache, a few thousand Claude Sonnet tokens otherwise |
 | `/handoff` | one question over the cached conversation, plus writing the file |
-| `/ship` commit message | one short Claude Sonnet call |
+| `/shipit` commit message | one short Claude Sonnet call |
 | **Create PR** title and description | one short Claude Sonnet call |
 | Changes panel and diff pane | free |
 | **⇡** Prompt Upgrade | one question for the questions and one for the rewrite (plus one per **Try again**); cheap from a warm cache, a few thousand Claude Sonnet tokens otherwise |
@@ -266,7 +266,7 @@ No telemetry and no services of its own: nothing leaves your machine except thro
 | What | When |
 |---|---|
 | `git` in your project, including a background `git fetch` every 5 minutes (downloads, never changes your files) | always, in a git project |
-| your build (`npm run build`, or `gradlew assembleDebug` in an Android project) | before a `/ship` commit, when `SHIP_BUILD` is on |
+| your build (`npm run build`, or `gradlew assembleDebug` in an Android project) | before a `/shipit` commit, when `SHIP_BUILD` is on |
 | your dev command (from `.claude/launch.json`, with its `env`, else `npm run dev`) | when you press **Start** |
 | `netstat -ano` and `taskkill /PID <pid> /T /F` on Windows, `lsof` and `kill` elsewhere, on the process listening on your dev port | when you press **■** or **↻** |
 | an HTTP request to `http://localhost:<your dev port>/` | to show whether the dev server is up |
@@ -305,7 +305,7 @@ Everything else that goes into your prompt box (next options, ideas, the brief, 
 | `prompt.submit` | Notes the prompt for the report and the next list. With a helper number set in the **◈** panel, it adds one line beside your prompt telling Claude to use at most that many helpers. Your text is never changed. |
 | `agent.spawn` | With a helper number set, refuses a helper past it (with a reason Claude reads). With **Fast & cheap**, gives a helper whose call names no model the model one below yours. On **Auto** it changes nothing. |
 | `turn.complete`, `turn.step`, `session.append`, `tool.call` | Read only: timings, tokens and costs for the strip and the report, Claude's last answer for the next list, a limit error for the resend offer, and whether files were edited (for the dev rebuild check). |
-| `command.run`, `config.set` | Read only: notice `/effort`, `/fast` and thinking changes, which empty the conversation cache. Its own commands (`/ship`, `/handoff`, `/limits`, `/report`, `/strip`, `/brief`) are registered here. |
+| `command.run`, `config.set` | Read only: notice `/effort`, `/fast` and thinking changes, which empty the conversation cache. Its own commands (`/shipit`, `/handoff`, `/limits`, `/report`, `/strip`, `/brief`) are registered here. |
 | `session.compact` | Writes `.claude/handoff.md` before a compaction and opens the brief after it. The compaction itself is unchanged. |
 | `session.start`, `session.attach`, `classic.SessionStart`, `classic.PreModelSwitch`, `classic.PostModelSwitch` | Read only: start the strip, restore the cache clock on resume, warn before a model switch drops a warm cache. |
 | `ui.render` | Draws the strip above the prompt and its panes. |

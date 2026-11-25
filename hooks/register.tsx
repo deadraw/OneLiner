@@ -639,7 +639,7 @@ async function prText($: Engine, base: string): Promise<{ title: string; body: s
 // ── loading the strip, and reloading it while developing ────────
 
 /** For the credit line. Raised with plugin.json and marketplace.json at every release. */
-const VERSION = '1.0.13'
+const VERSION = '1.0.14'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: Engine, cwd: string, at: number) {
@@ -1200,7 +1200,7 @@ function demoFixture(level: DemoLevel, at: number, n: NextState): {
 
 /** Strip parts in strip order: id, label in the panel, words /strip <word> accepts. */
 const STRIP_PARTS: { id: string; label: string; words: string[] }[] = [
-  { id: 'git', label: 'git', words: ['git', 'ship'] },
+  { id: 'git', label: 'git', words: ['git', 'ship', 'shipit'] },
   { id: 'dev', label: 'dev server', words: ['dev', 'server', 'devserver'] },
   { id: 'limit', label: '5h limit', words: ['limit', '5h', 'limits'] },
   { id: 'context', label: 'context', words: ['context', 'ctx'] },
@@ -1841,18 +1841,20 @@ export const register: Register = on => {
     // Only what the session needs before it starts is awaited, all at once; the strip's
     // readings fill in after, each part as soon as its own check answers.
     const [, saved, at] = await Promise.all([
-      Promise.all([
-        $.command.register({ name: 'ship', description: 'Commit (and optionally push) the working tree' }),
-        $.command.register({ name: 'brief', description: 'Show where you left off in this project' }),
-        $.command.register({ name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' }),
-        $.command.register({ name: 'limits', description: 'Show today\'s 5h limit usage and forecast' }),
-        $.command.register({ name: 'report', description: 'What Claude did for you: time, sessions and the API price, by day, week, month and year' }),
-        $.command.register({
+      // Each command registers on its own: one refused name (say, a new built-in) must not stop the rest
+      // of the session start, which loads every strip part.
+      Promise.all(([
+        { name: 'shipit', description: 'Commit (and optionally push) the working tree' },
+        { name: 'brief', description: 'Show where you left off in this project' },
+        { name: 'handoff', description: 'Update your handoff file (CURRENT.md / HANDOFF.md) from this conversation' },
+        { name: 'limits', description: 'Show today\'s 5h limit usage and forecast' },
+        { name: 'report', description: 'What Claude did for you: time, sessions and the API price, by day, week, month and year' },
+        {
           name: 'strip',
           description: 'Turn strip parts on or off (all projects)',
           argumentHint: '[git|dev|limit|context|cache|agents|next|all] or agents [1-20|auto] or demo [green|yellow|red|next|ideas|play|off] or reload [fresh]',
-        }),
-      ]),
+        },
+      ] as const).map(c => $.command.register(c).catch(() => {}))),
       $.store.get(HIDDEN_KEY),
       $.clock.now(),
     ])
@@ -2149,7 +2151,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'ship' }, async $ => {
+  on('command.run', { command: 'shipit' }, async $ => {
     await ship($)
     return {} // the pane or popup is the answer: no transcript line
   })
