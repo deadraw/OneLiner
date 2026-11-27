@@ -46,16 +46,14 @@ Working with Claude Code all day, the same things keep costing time:
 |---|---|---|---|---|
 | **git** | branch, changed files (Δ), unpushed (↑), behind (↓) | clean and pushed | changes not shipped / behind (**▴** opens the changes panel with **Ship**) | merge conflict, rebase stopped halfway, diverged |
 | **dev** | your local dev server | running | - | build error (gray when off, + **Start**) |
-| **⇡ upgrade** | turns the prompt you are typing into a better one, in a side pane ([more ↓](#prompt-upgrade)) | - | - | - |
-| **◈ agents** | helpers Claude runs for this task: how many are working, or the number you set (`◈ 3`) | helpers working | - | - |
+| **◈ agents** | shown only while helpers work for this task or you set a number for the next one (`◈ 3`); opened from **tools** | helpers working | - | - |
 | **5h limit** | 5-hour usage, forecast, reset time | ≤ 70% | 71–85% | ≥ 86% (+ **📝** handoff, once ctx is 25% or more) |
 | **ctx** | context window fill and tokens | ≤ 49% | 50–70% | ≥ 71% (+ **📝** handoff and **♻️** compact) |
 | **cache** | minutes until the prompt cache expires · % of the last turn read from cache | ≥ half the lifetime left | 25–50% left | < 25% left, cold, or reset (+ **♻️** compact from 30% context) |
-| **next** | options from Claude's last answer + ideas on request | | | |
+| **tools** | options from Claude's last answer (`tools 2 ▴`), ideas on request, **⇡ upgrade**, **◈ agents** and **▤ report** | | | |
 
 Extras that appear only when relevant:
 
-- `· full ~16:40`: at your recent pace, the 5-hour window fills before it resets.
 - `· 7d 74%`: the weekly window, shown from 70%.
 - `· switch re-sends 306k`: what a `/model` switch would throw away (wide strip, warm cache, large context).
 - `cache reset · effort`: you changed effort, thinking or fast mode, which empties the conversation cache.
@@ -70,13 +68,13 @@ In the desktop app, point at any part of the strip to see more, written into the
 | **dev** | the server address, or the full build error; while it runs, **■** stops it and **↻** restarts it (whoever started it: **Start**, Claude or a terminal) |
 | **5h limit** | reset time, fill forecast, weekly window, what this conversation has cost at API prices (`$2.43`, kept across restarts and resumes), and `↑ 3 agents` while helpers are using it |
 | **ctx** | free space and window size, with **📝** (handoff) and **♻️** (compact) at any fill level |
-| **cache** | when it expires if you stay idle, and its lifetime |
+| **cache** | when it expires if you stay idle, and its lifetime; on a 60-minute cache, **🔥** keeps it warm (see below) |
 
 Token counts read the way you'd say them: `482k`, `1M`, `1.2M`.
 
 ### Changes
 
-**▴** before the branch opens the changes panel, in the same place as `next`. While it is open, git's hover detail stays shown on the strip, and **changes ▾** in the strip's top right corner closes it. **▴** and dev's **Start** sit before their text, so pointing at them doesn't open the hover.
+**▴** before the branch opens the changes panel, in the same place as `tools`. While it is open, git's hover detail stays shown on the strip, and **changes ▾** in the strip's top right corner closes it. **▴** and dev's **Start** sit before their text, so pointing at them doesn't open the hover.
 
 - every changed file with its lines added and removed (`new` or `binary` when there are none to count); pick one (or press 1-9) to see its diff in a pane, with **‹ Previous** / **Next ›** through the rest
 - the commits waiting to push
@@ -84,7 +82,7 @@ Token counts read the way you'd say them: `482k`, `1M`, `1.2M`.
 
 ### Agents
 
-**◈** on the right opens the agents panel: how many helper agents Claude may use for your **next task**, and on which model.
+**◈ agents** in the tools list (key `A`) opens the agents panel: how many helper agents Claude may use for your **next task**, and on which model.
 
 - **helpers**: **Auto** (Claude decides, as without OneLiner), **1 3 5 10 15 20**, or **Custom** with a **− N +** stepper from 1 to 20.
 - **model**: **Same model**, or **Fast & cheap**: one model below yours (Opus → Sonnet, Sonnet → Haiku), for helpers whose call names no model.
@@ -96,7 +94,7 @@ The setting is for one task: once an answer that used helpers is done (and they 
 
 ### Prompt Upgrade
 
-**⇡**, left of **◈**, takes what you have typed in the prompt box and turns it into a clearer prompt, in a side pane:
+**⇡ upgrade** in the tools list (key `U`) takes what you have typed in the prompt box and turns it into a clearer prompt, in a side pane:
 
 1. **Questions**: up to three quick multiple-choice questions that would most improve the result, as chips, each with **Other** (type your own) and **Skip**; **Skip the rest, upgrade now** goes straight on. When no question would help, it skips to the rewrite.
 2. **Rewrite**: your prompt with a clear goal, who it is for, the format and what "done" looks like. It keeps what you meant, uses only what you answered, and never invents facts, names or numbers: anything unknown stays as a `[placeholder]`.
@@ -104,11 +102,11 @@ The setting is for one task: once an answer that used helpers is done (and they 
 
 **Use it** puts the upgrade in your prompt box. Nothing is sent until you press Enter. While the cache is warm the questions and the rewrite are asked over the cached conversation, so they know what you are working on; otherwise Claude Sonnet answers on a short digest. The pane shows which one ran. `/strip upgrade` hides the button.
 
-On a narrow window the strip first drops the optional extras (switch hint, `% read`, `7d`), then switches to short labels (`main 4Δ 2↑`, `5h 78% →03:03`, `⏱22m`), and only then drops whole parts: **dev**, **git**, **ctx**. **Limit** and **cache** always stay, and so does **dev** while it offers **Start**.
+On a narrow window the strip first drops the optional extras (switch hint, `% read`, `7d`), then switches to short labels (`main 4Δ 2↑`, `⏱22m`), and only then drops whole parts: **dev**, **git**, **ctx**. **Limit** and **cache** always stay, and so does **dev** while it offers **Start**.
 
-## The next list
+## The tools list
 
-Click **`next ▴`** to open a short list above the prompt:
+Click **`tools ▴`** to open a short list above the prompt:
 
 <p>
   <img src=".github/assets/strip_next.png" alt="The next list: options from Claude's last answer" width="49%">
@@ -127,7 +125,7 @@ Picking an item fills your prompt box. Nothing is sent until you press Enter.
 
 ## Work report
 
-`/report` (or **▤ report** in the next list) opens a pane with what Claude did for you, from real numbers only:
+`/report` (or **▤ report** in the tools list) opens a pane with what Claude did for you, from real numbers only:
 
 - **Today / Week / Month / Year** tabs.
 - **AI TIME**: how long Claude worked on your prompts. **SESSIONS**: how many sessions had turns. **API PRICE**: what the same tokens would have cost at API prices, from Claude Code's own cost figures.
@@ -239,6 +237,15 @@ Measured across ~6,900 requests from real sessions, by the gap since the previou
 
 That cliff after one hour is what the cache segment counts down to.
 
+**🔥 Keep warm.** On a 60-minute cache, the 🔥 in the cache hover turns keep warm on. When 5 minutes are left, OneLiner sends one short ping (Claude replies `ok`), which reads the conversation from the cache and starts its hour again. A ping costs about a twentieth of rebuilding a cold cache, so it pays off when you come back within hours rather than days.
+
+- Off in every new or resumed session, and off again with a second press.
+- Skipped while a turn runs or while you have text in the prompt box: your own message refreshes the cache anyway.
+- Stops by itself after 8 pings (about 8 hours), or when the cache drops to 5 minutes or goes cold.
+- The strip shows `🔥` while it is on; the hover counts the pings.
+- Each ping adds a short prompt and an `ok` to the conversation. Pings don't count as tasks in `/report` and don't replace your next steps.
+- A computer that sleeps sends no ping, so the cache goes cold as usual.
+
 The **limit forecast** is an estimate: a straight line through the last 30 minutes of readings. Treat it as an early warning, not a promise.
 
 ## What costs tokens
@@ -256,6 +263,7 @@ Almost nothing. Everything on the strip is read from data Claude Code already ha
 | Changes panel and diff pane | free |
 | **⇡** Prompt Upgrade | one question for the questions and one for the rewrite (plus one per **Try again**); cheap from a warm cache, a few thousand Claude Sonnet tokens otherwise |
 | `/report` | free: it adds up what each turn already reported |
+| **🔥** Keep warm | one tiny turn per hour while on: the conversation read from the cache (a tenth of the input price) and a one-word answer |
 | Agents panel and its setting | free. The helpers themselves are Claude working: each runs its own context, so several at once use your limit faster. **Fast & cheap** runs them one model below yours |
 | Handoff note before compaction (`.claude/handoff.md`) | one question over the cached conversation, once per compaction (Claude Sonnet when there is nothing cached yet) |
 
@@ -291,6 +299,7 @@ It never changes your permission settings, never writes Claude Code's settings f
 
 - **Clear & continue**: one prompt, as you, after the clear: *Read ./HANDOFF.md (your handoff file) and then tell me briefly where we left off and propose the next steps. Don't start any work until I confirm which step to take.*
 - **Switch model & resend** and **Resend at HH:MM**: the prompt of yours that the limit stopped, unchanged.
+- **🔥 Keep warm**, while you have it on: once an hour, 5 minutes before the cache runs out, as OneLiner: *Keep-alive ping from OneLiner to keep the prompt cache warm. Reply with only "ok". Do not use any tools.*
 
 Everything else that goes into your prompt box (next options, ideas, the brief, Prompt Upgrade) is only filled in. You send it with Enter.
 

@@ -46,6 +46,11 @@ type ReportDay = {
 
 const CACHE_TTL_MIN = 60 // subscription default
 const CACHE_TTL_OVERAGE_MIN = 5 // extra usage / reported 5m
+// Keep warm (60-minute cache only): one short ping this many minutes before the cache runs out,
+// at most KEEP_WARM_MAX times (about as many hours), so a forgotten session stops on its own.
+const KEEP_WARM_LEAD_MIN = 5
+const KEEP_WARM_MAX = 8
+const KEEP_WARM_TEXT = 'Keep-alive ping from OneLiner to keep the prompt cache warm. Reply with only "ok". Do not use any tools.'
 const LIMIT_WARN_PCT = 90 // popup
 // Strip colors. Limit: ≤70 green, 71–85 yellow, ≥86 red.
 const LIMIT_YELLOW_PCT = 71
@@ -286,13 +291,16 @@ function lineDiff(before: string, after: string): { added: number; removed: numb
 
 /** The folder git runs in, found once per project root. */
 let gitFolder: { root: string; dir: string } | null = null
+// The folder the session started in: git's fallback while Claude Code has no root to report yet
+// (a new conversation, before its first turn), so the git part shows from the start.
+let startFolder = ''
 
 /**
  * The session's project root, or, when that is no repository, the one repository directly
  * beneath it (a session opened on a folder that holds the project: AI-Games/kingshot).
  */
 async function gitDir($: Engine): Promise<string | undefined> {
-  const root = await $.session.root().catch(() => undefined)
+  const root = (await $.session.root().catch(() => undefined)) || startFolder || undefined
   if (!root) return undefined
   if (gitFolder?.root === root) return gitFolder.dir
   let dir = root
@@ -639,7 +647,7 @@ async function prText($: Engine, base: string): Promise<{ title: string; body: s
 // ── loading the strip, and reloading it while developing ────────
 
 /** For the credit line. Raised with plugin.json and marketplace.json at every release. */
-const VERSION = '1.0.14'
+const VERSION = '1.0.15'
 
 /** Every reading the strip shows, in the background: limit + ctx first, then git, dev and the rest. */
 function loadReadings($: Engine, cwd: string, at: number) {
@@ -1105,6 +1113,44 @@ function secsLeftExact(c: CacheState, ttl: number, at: number): number | null {
   return c.lastTurnAt === null ? null : Math.max(0, ttl * 60 - (at - c.lastTurnAt) / 1000)
 }
 
+// ── keep warm ───────────────────────────────────────────────────
+
+let isTurnRunning = false // a main turn is running: its own request refreshes the cache
+let isPingTurn = false // the running (or queued) main turn is a keep-warm ping, not your work
+
+/** The 🔥 button: keep warm on or off. Every turn-on starts the ping count again. */
+async function toggleKeepWarm($: Engine) {
+  const c = await update($, cache, x => ({ ...x, keepWarm: !x.keepWarm, warmPings: 0 }))
+  $.ui.toast(c.keepWarm
+    ? `Keeping the cache warm: a short ping ${KEEP_WARM_LEAD_MIN} min before it runs out, up to ${KEEP_WARM_MAX} times`
+    : 'Keep warm off', { timeoutMs: 6000 })
+}
+
+/** Every minute: 5 minutes left of a 60-minute cache, no turn running, nothing typed → one short ping. */
+async function keepWarmTick($: Engine) {
+  const [c, l, at] = await Promise.all([read($, cache), read($, limit), $.clock.now()])
+  if (!c.keepWarm || isTurnRunning || isPingTurn) return
+  const ttl = cacheTtl(c, l)
+  const secs = secsLeftExact(c, ttl, at)
+  if (ttl < CACHE_TTL_MIN || secs === null || secs <= 0 || c.resetReason) {
+    // A 5-minute cache, or one already gone: a ping can't pay for itself, so keep warm ends.
+    await update($, cache, x => ({ ...x, keepWarm: false }))
+    return void $.ui.toast(ttl < CACHE_TTL_MIN ? 'Keep warm off: the cache is 5 minutes now' : 'Keep warm off: the cache went cold')
+  }
+  if (secs > KEEP_WARM_LEAD_MIN * 60) return
+  if ((await $.prompt.read()).text.trim()) return // you're typing: your own message will refresh it
+  const pings = (c.warmPings ?? 0) + 1
+  isPingTurn = true
+  await update($, cache, x => ({ ...x, warmPings: pings, keepWarm: pings < KEEP_WARM_MAX }))
+  try {
+    await $.prompt.submit({ text: KEEP_WARM_TEXT })
+  } catch {
+    isPingTurn = false
+    return
+  }
+  if (pings >= KEEP_WARM_MAX) $.ui.toast(`Keep warm off after ${KEEP_WARM_MAX} pings`, { timeoutMs: 8000 })
+}
+
 /** A setting change emptied the conversation cache: the next message re-sends everything. */
 async function markCacheReset($: Engine, reason: string) {
   const c = await read($, cache)
@@ -1207,7 +1253,7 @@ const STRIP_PARTS: { id: string; label: string; words: string[] }[] = [
   { id: 'cache', label: 'cache', words: ['cache', 'clock'] },
   { id: 'upgrade', label: 'upgrade', words: ['upgrade', 'better'] },
   { id: 'agents', label: 'agents', words: ['agents', 'helpers'] },
-  { id: 'next', label: 'next', words: ['next', 'ideas', 'suggestions'] },
+  { id: 'next', label: 'tools', words: ['tools', 'next', 'ideas', 'suggestions'] },
 ]
 const HIDDEN_KEY = 'strip:hidden' // one $.store value: the same for every project and session
 
@@ -1838,6 +1884,10 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
+    startFolder = e.cwd
+    isTurnRunning = false
+    isPingTurn = false
+    await update($, cache, x => (x.keepWarm || x.warmPings ? { ...x, keepWarm: false, warmPings: 0 } : x))
     // Only what the session needs before it starts is awaited, all at once; the strip's
     // readings fill in after, each part as soon as its own check answers.
     const [, saved, at] = await Promise.all([
@@ -1852,7 +1902,7 @@ export const register: Register = on => {
         {
           name: 'strip',
           description: 'Turn strip parts on or off (all projects)',
-          argumentHint: '[git|dev|limit|context|cache|agents|next|all] or agents [1-20|auto] or demo [green|yellow|red|next|ideas|play|off] or reload [fresh]',
+          argumentHint: '[git|dev|limit|context|cache|agents|tools|all] or agents [1-20|auto] or demo [green|yellow|red|next|ideas|play|off] or reload [fresh]',
         },
       ] as const).map(c => $.command.register(c).catch(() => {}))),
       $.store.get(HIDDEN_KEY),
@@ -1905,6 +1955,7 @@ export const register: Register = on => {
         await Promise.all([
           probeDev($),
           refreshLimit($),
+          keepWarmTick($),
           ticks % 5 === 0 ? fetchRemote($).then(() => refreshGit($)) : ticks % 2 === 0 ? refreshGit($) : null,
         ])
       })()
@@ -1920,6 +1971,13 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    // A keep-warm ping: none of your prompt's bookkeeping (saved prompts, panels, task count).
+    if (e.origin.kind === 'plugin' && e.text === KEEP_WARM_TEXT) {
+      isPingTurn = true
+      isTurnRunning = true
+      return next(e)
+    }
+    isTurnRunning = true
     if (cwd && e.text.trim() && !e.text.startsWith('/')) {
       const key = storeKey(cwd)
       const stored = ((await $.store.get(key)) as Stored | undefined) ?? { lastAt: 0, prompts: [] }
@@ -2009,6 +2067,9 @@ export const register: Register = on => {
     // state change. A few redraws over the next seconds bring it straight back.
     if (e.isAborted) for (const ms of [1_000, 3_000, 8_000]) $.clock.after(ms, () => void update($, now, () => Date.now()))
     if (e.usage?.model) sessionModel = e.usage.model
+    const wasPing = isPingTurn
+    isPingTurn = false
+    isTurnRunning = false
     {
       const wasTask = isTaskTurn && e.reason === 'answer' && !e.isAborted
       isTaskTurn = false
@@ -2032,7 +2093,8 @@ export const register: Register = on => {
       })()
     }
     const options = extractNextSteps(e.answer)
-    await update($, nextSteps, (): NextState => ({
+    // A ping's "ok" leaves your last answer's next steps where they are.
+    if (!wasPing) await update($, nextSteps, (): NextState => ({
       isOpen: false, fromAnswer: options, ai: [], aiGrades: [], optionGrades: options.map(recommendedGrade), aiStatus: 'idle', aiVia: null,
       answerTail: e.answer.slice(-1500), view: 'main', model: e.usage?.model ?? null,
     }))
@@ -2045,7 +2107,9 @@ export const register: Register = on => {
     await update($, now, () => at)
     if (cwd) {
       const stored = ((await $.store.get(storeKey(cwd))) as Stored | undefined) ?? { lastAt: 0, prompts: [] }
-      await $.store.set(storeKey(cwd), { ...stored, lastAt: at, cacheAt: cacheFrom, answerTail: e.answer.slice(-1500), options })
+      await $.store.set(storeKey(cwd), wasPing
+        ? { ...stored, cacheAt: cacheFrom }
+        : { ...stored, lastAt: at, cacheAt: cacheFrom, answerTail: e.answer.slice(-1500), options })
     }
     void Promise.all([refreshGit($), refreshLimit($), probeDev($)])
     if (editedThisTurn) {
@@ -2104,6 +2168,8 @@ export const register: Register = on => {
   // The app (re)attached to the session, e.g. after a rewind or a reconnect: draw the strip again now.
   on('session.attach', async ($, e, next) => {
     const result = await next(e)
+    // Coming back to a session: keep warm starts off, as in a new one.
+    await update($, cache, x => (x.keepWarm || x.warmPings ? { ...x, keepWarm: false, warmPings: 0 } : x))
     $.clock.after(500, () => void update($, now, () => Date.now()))
     return result
   })
@@ -2365,6 +2431,7 @@ export const register: Register = on => {
       detailMode?: 'push' | 'over' // push the parts to its right aside, or cover them to the strip's end
       buttons?: { label: string; onPress: () => void; plain?: true }[] // more buttons after `button`
       detailButtons?: { label: string; onPress: () => void; plain?: true }[] // actions offered only on hover
+      isDetailButtonFirst?: true // hover buttons before the detail text, not after it (a detail that slides)
       toggle?: { label: string; onPress: () => void } // a plain ▾ / ▴ right after the text
       isActionFirst?: boolean // its buttons go before the text, outside its hover (git's ▴, dev's Start)
       isDetailShown?: boolean // the detail stays out, no hover needed (git's, while the changes panel is open)
@@ -2454,8 +2521,8 @@ export const register: Register = on => {
       const hot = tone !== 'success'
       const minsLeft = l.resetsAt ? Math.max(0, Math.ceil((Date.parse(l.resetsAt) - at) / 60_000)) : null
       const fullAt = limitFullAt(l)
-      const reset = fullAt !== null ? ` · full ~${hhmmAt(fullAt)}`
-        : minsLeft !== null && minsLeft < 60 ? ` · ${minsLeft} min`
+      // The fill forecast lives in the hover only (with the reset time), never twice side by side.
+      const reset = minsLeft !== null && minsLeft < 60 ? ` · ${minsLeft} min`
         : hot && l.resetsAt && !isTight ? ` · ${hhmm(l.resetsAt)}` : ''
       const week = l.weekPercent !== null && l.weekPercent >= WEEK_SHOW_PCT ? Math.round(l.weekPercent) : null
       segs.push({
@@ -2525,6 +2592,7 @@ export const register: Register = on => {
           : cold ? 'cache cold' : `${isTight ? '⏱' : 'cache '}${clock}`,
         color: timeTone,
         extras: [
+          ...(!cold && c.keepWarm ? [{ text: ' 🔥' }] : []),
           ...(!cold && !isTight && c.readPercent !== null ? [{ text: ` · ${c.readPercent}% read`, color: readTone, drop: 2 }] : []),
           // A /model switch throws this warm cache away; say how much it would re-send.
           ...(!cold && cols >= SWITCH_HINT_COLS && share >= CACHE_RED_SHARE && (ctx.tokens ?? 0) >= SWITCH_HINT_TOKENS
@@ -2535,9 +2603,14 @@ export const register: Register = on => {
         detail: [
           cold || c.resetReason
             ? `the next message re-sends ${ctx.tokens ? `~${tokensShort(ctx.tokens)}` : 'the conversation'} at full price`
-            : c.lastTurnAt ? `expires ${hhmmAt(c.lastTurnAt + ttl * 60_000)} if idle` : '',
+            : c.lastTurnAt ? `expires ${hhmmAt(c.lastTurnAt + ttl * 60_000)}` : '',
           `${ttl}m lifetime${isShort ? ' (extra usage)' : ''}`,
+          !cold && !isShort ? (c.keepWarm ? `kept warm · ${c.warmPings ?? 0}/${KEEP_WARM_MAX} pings` : '') : '',
         ].filter(Boolean).join(' · '),
+        // Keep warm, 60-minute cache only: a ping 5 minutes before the end costs far less than rebuilding it.
+        detailButtons: !cold && !isShort && !c.resetReason
+          ? [{ label: '🔥', plain: true as const, onPress: () => void toggleKeepWarm($) }] : undefined,
+        isDetailButtonFirst: true,
         detailMode: 'push',
       })
     }
@@ -2559,7 +2632,7 @@ export const register: Register = on => {
     })()
     if (!changesOpen && !agentsOpen) segs.push({
       id: 'next', text: '',
-      button: { label: n.isOpen ? 'next ▾' : n.fromAnswer.length ? `next ${n.fromAnswer.length} ▴` : 'next ▴', onPress: toggleNext },
+      button: { label: n.isOpen ? 'tools ▾' : n.fromAnswer.length ? `tools ${n.fromAnswer.length} ▴` : 'tools ▴', onPress: toggleNext },
     })
 
     if (demoLevel) {
@@ -2574,9 +2647,10 @@ export const register: Register = on => {
     const width = (s: Seg) => s.text.length + (s.extras ?? []).reduce((w, x) => w + x.text.length, 0) + (s.button ? s.button.label.length + (s.button.plain ? 2 : 5) : 0)
       + (s.toggle ? 2 : 0)
       + (s.buttons ?? []).reduce((w, b) => w + b.label.length + (b.plain ? 2 : 5), 0) + 3
-    // ◈ (and its count) sits on the right with next: its room counts too.
-    const agentsWidth = (hiddenParts.includes('agents') ? 0 : 4 + (runningHelpers > 0 || ag.cap !== null ? 6 : 0))
-      + (hiddenParts.includes('upgrade') ? 0 : 4)
+    // ⇡ and ◈ live in the tools panel. ◈ and its count come out beside tools only while helpers run,
+    // a cap is set for the next task, or the agents panel is open: their room counts then.
+    const isAgentsShown = !hiddenParts.includes('agents') && (runningHelpers > 0 || ag.cap !== null || agentsOpen)
+    const agentsWidth = isAgentsShown ? 4 + (runningHelpers > 0 || ag.cap !== null ? 6 : 0) : 0
     const total = (list: Seg[]) => list.reduce((n, s) => n + width(s), agentsWidth)
     let shown = segs.filter(s => !hiddenParts.includes(s.id))
     for (const level of [1, 2, 3]) {
@@ -2641,8 +2715,14 @@ export const register: Register = on => {
       const { Client } = $.ui.resolve(e)
       return <Client key={`${s.id}-marquee`} module="./marquee.tsx" width={room} props={{ text, dim: true }} />
     }
+    const hoverButtons = (s: Seg) => (s.detailButtons ?? []).length > 0 && (
+      <Box key={`${s.id}-hover-btns`} flexDirection="row" gap={1} flexShrink={0}>
+        {(s.detailButtons ?? []).map((b, i) => <Button key={`${s.id}-hover-btn-${i}`} plain={b.plain} label={b.label} onPress={b.onPress} />)}
+      </Box>
+    )
     const detailText = (s: Seg, i: number) => {
-      const text = ` · ${s.detail}`
+      // After hover buttons the text needs no separator: the buttons already set it apart.
+      const text = s.isDetailButtonFirst && (s.detailButtons ?? []).length > 0 ? `${s.detail}` : ` · ${s.detail}`
       const room = detailRoom(i)
       // The last part's detail takes the free room to its right and measures it itself (a desktop
       // draws text narrower than a cell, so a count from the left comes out short).
@@ -2674,8 +2754,13 @@ export const register: Register = on => {
                     </Box>
                   // Pushes the parts to its right aside while hovered.
                   : <Box display={s.isDetailShown ? 'flex' : 'none'} gap={1} flexGrow={i === leftSegs.length - 1 ? 1 : 0} hover={s.isDetailShown ? undefined : { display: 'flex' }}>
-                      {detailText(s, i)}
-                      {(s.detailButtons ?? []).map((b, i) => <Button key={`${s.id}-hover-btn-${i}`} plain={b.plain} label={b.label} onPress={b.onPress} />)}
+                      {/* Buttons at full size, before the text where the part asks for it (cache: there the moment you
+                          hover, never pushed out by its sliding detail), else after it. The text takes the room left. */}
+                      {s.isDetailButtonFirst && hoverButtons(s)}
+                      <Box key={`${s.id}-hover-text`} flexDirection="row" flexGrow={1} flexShrink={1} overflow="hidden">
+                        {detailText(s, i)}
+                      </Box>
+                      {!s.isDetailButtonFirst && hoverButtons(s)}
                     </Box>
               )}
             </Box>
@@ -2683,12 +2768,9 @@ export const register: Register = on => {
         ))}
         </Box>
         <Box flexDirection="row" gap={1} flexShrink={0} marginLeft={1}>
-          {/* ⇡ upgrades what you typed in the prompt box, in a pane of its own. */}
-          {!hiddenParts.includes('upgrade') && (
-            <Button key="upgrade-btn" plain label={upgradeBusy ? '⇡…' : '⇡'} onPress={() => void startUpgrade($, cwd)} />
-          )}
-          {/* ◈ opens the agents panel; beside it the helpers working now, or the cap set for the next task. */}
-          {!hiddenParts.includes('agents') && (
+          {/* ◈ (opened from tools) stays out here while it has something to say: the helpers working now,
+              or the cap set for the next task, and its close while the agents panel is open. */}
+          {isAgentsShown && (
             <Box flexDirection="row">
               <Button key="agents-btn" plain label={agentsOpen ? '◈ ▾' : '◈'} onPress={toggleAgents} />
               {runningHelpers > 0
@@ -2981,7 +3063,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {strip}
-        {title('next', n.fromAnswer.length ? 'from the last answer' : undefined)}
+        {title('next', n.fromAnswer.length ? 'from the last answer' : undefined, true)}
         {n.fromAnswer.length === 0 && note('no options in the last answer')}
         {n.fromAnswer.map((t, i) => gradedRow(`next-${i}`, String(i + 1), shortLabel(t, labelMax), n.optionGrades?.[i] ?? 0, () => pick(t)))}
         {rule}
@@ -2992,6 +3074,14 @@ export const register: Register = on => {
         <Box flexDirection="row" width={cols} justifyContent="space-between">
           {styledRow('next-0', '0', <Text color="error">close</Text>, toggleNext)}
           <Box flexDirection="row" gap={1}>
+            {/* The tools: ⇡ upgrades what you typed in the prompt box (in a pane of its own), ◈ opens the agents panel. */}
+            {!hiddenParts.includes('upgrade') && (
+              <Button key="next-upgrade" plain hotkey="u" label={upgradeBusy ? '⇡… upgrade' : '⇡ upgrade'} onPress={() => {
+                void update($, nextSteps, (x): NextState => ({ ...x, isOpen: false }))
+                void startUpgrade($, cwd)
+              }} />
+            )}
+            {!hiddenParts.includes('agents') && <Button key="next-agents" plain hotkey="a" label="◈ agents" onPress={toggleAgents} />}
             <Button key="next-report" plain hotkey="r" label="▤ report" onPress={() => void openReport($)} />
             {credit}
           </Box>

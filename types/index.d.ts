@@ -64,6 +64,10 @@ export type CacheState = {
   reportedTtl: number | null
   /** Set when a setting change (effort, thinking, fast mode) empties the conversation cache. */
   resetReason: string | null
+  /** Keep warm: a short ping 5 minutes before a 60-minute cache runs out. Off at every session start. */
+  keepWarm?: boolean
+  /** Pings sent since keep warm was last turned on. */
+  warmPings?: number
 }
 
 export type NextState = {
