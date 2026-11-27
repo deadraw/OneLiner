@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-e34a9e)](LICENSE)
 [![Claude Code 2.1.286+](https://img.shields.io/badge/Claude_Code-2.1.286%2B-d97757)](#install)
 
-![OneLiner in Claude Code: green, yellow, red, the next list and graded ideas](https://raw.githubusercontent.com/deadraw/OneLiner/assets/one-liner.gif)
+![OneLiner in Claude Code: green, yellow, red, the tools list and graded ideas](https://raw.githubusercontent.com/deadraw/OneLiner/assets/one-liner.gif)
 
 ![All good: everything green](.github/assets/strip_green.png)
 ![Getting tight: uncommitted work, limit filling before reset, cache cooling](.github/assets/strip_yellow.png)
@@ -40,7 +40,7 @@ Working with Claude Code all day, the same things keep costing time:
 
 ## The strip
 
-![All states and features at a glance: strips, hover details, questions in the strip, next, ideas and the brief (illustration)](.github/assets/strip_all.png)
+![All states and features at a glance: strips, hover details, questions in the strip, keep warm, the tools list, ideas and the brief (illustration)](.github/assets/strip_all.png)
 
 | Segment | Shows | 🟢 | 🟡 | 🔴 |
 |---|---|---|---|---|
@@ -109,7 +109,7 @@ On a narrow window the strip first drops the optional extras (switch hint, `% re
 Click **`tools ▴`** to open a short list above the prompt:
 
 <p>
-  <img src=".github/assets/strip_next.png" alt="The next list: options from Claude's last answer" width="49%">
+  <img src=".github/assets/strip_next.png" alt="The tools list: options from Claude's last answer" width="49%">
   <img src=".github/assets/strip_ideas.png" alt="Ideas graded gold, silver and bronze" width="49%">
 </p>
 
